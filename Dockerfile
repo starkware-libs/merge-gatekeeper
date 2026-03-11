@@ -2,7 +2,7 @@ ARG GO_VERSION=1.24.0
 
 FROM public.ecr.aws/docker/library/golang:${GO_VERSION}-alpine
 
-ARG ORG=upsidr
+ARG ORG=starkware-libs
 ARG REPO=merge-gatekeeper
 
 ENV GO111MODULE=on LANG=en_US.UTF-8

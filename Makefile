@@ -1,6 +1,6 @@
 TOKEN=${GITHUB_TOKEN}
 REF=main
-REPO=upsidr/merge-gatekeeper
+REPO=starkware-libs/merge-gatekeeper
 IGNORED=""
 
 go-build:

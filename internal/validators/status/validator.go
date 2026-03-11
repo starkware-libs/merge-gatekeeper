@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/upsidr/merge-gatekeeper/internal/github"
-	"github.com/upsidr/merge-gatekeeper/internal/multierror"
-	"github.com/upsidr/merge-gatekeeper/internal/validators"
+	"github.com/starkware-libs/merge-gatekeeper/internal/github"
+	"github.com/starkware-libs/merge-gatekeeper/internal/multierror"
+	"github.com/starkware-libs/merge-gatekeeper/internal/validators"
 )
 
 const (
