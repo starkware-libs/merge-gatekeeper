@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/starkware-libs/merge-gatekeeper/internal/github"
 	"github.com/starkware-libs/merge-gatekeeper/internal/multierror"
@@ -231,20 +232,8 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 			latestRunByName[name] = run
 			continue
 		}
-		existingInProgress := *existing.Status != checkRunCompletedStatus
-		thisInProgress := *run.Status != checkRunCompletedStatus
-		if thisInProgress && !existingInProgress {
-			sv.debugf("merge-gatekeeper [debug] job=%s: picked in_progress run id=%v (replaced completed run id=%v)\n",
-				name, run.ID, existing.ID)
-			latestRunByName[name] = run
-			continue
-		}
-		if !thisInProgress && existingInProgress {
-			sv.debugf("merge-gatekeeper [debug] job=%s: keeping in_progress run id=%v (dropped completed run id=%v)\n",
-				name, existing.ID, run.ID)
-			continue
-		}
-		// Both same completion state; keep the one with higher ID (more recent).
+		// Keep the one with the higher ID (more recent), as it represents the latest state
+		// (e.g. from a re-run or a newer check suite for the same commit).
 		thisID := int64(0)
 		if run.ID != nil {
 			thisID = *run.ID
@@ -254,9 +243,28 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 			existingID = *existing.ID
 		}
 		if thisID > existingID {
-			sv.debugf("merge-gatekeeper [debug] job=%s: picked newer run id=%v (replaced run id=%v)\n",
-				name, run.ID, existing.ID)
+			statusStr := "unknown"
+			if run.Status != nil {
+				statusStr = *run.Status
+			}
+			existingStatusStr := "unknown"
+			if existing.Status != nil {
+				existingStatusStr = *existing.Status
+			}
+			sv.debugf("merge-gatekeeper [debug] job=%s: picked newer run id=%d status=%s (replaced run id=%d status=%s)\n",
+				name, thisID, statusStr, existingID, existingStatusStr)
 			latestRunByName[name] = run
+		} else {
+			statusStr := "unknown"
+			if run.Status != nil {
+				statusStr = *run.Status
+			}
+			existingStatusStr := "unknown"
+			if existing.Status != nil {
+				existingStatusStr = *existing.Status
+			}
+			sv.debugf("merge-gatekeeper [debug] job=%s: keeping existing run id=%d status=%s (dropped older run id=%d status=%s)\n",
+				name, existingID, existingStatusStr, thisID, statusStr)
 		}
 	}
 
@@ -268,8 +276,26 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		names = append(names, name)
 	}
 	sort.Strings(names)
+
+	// Detect matrix parents: if name is "X" and there is another job starting with "X (", then "X" is a matrix parent.
+	// GitHub Actions often leaves matrix parent check runs as cancelled/stuck when a workflow is cancelled,
+	// while new workflow runs only report the matrix children. Tracking the parent would block forever.
+	isMatrixParent := make(map[string]bool)
+	for _, name := range names {
+		for _, otherName := range names {
+			if name != otherName && strings.HasPrefix(otherName, name+" (") {
+				isMatrixParent[name] = true
+				break
+			}
+		}
+	}
+
 	for _, name := range names {
 		run := latestRunByName[name]
+		if isMatrixParent[name] {
+			sv.debugf("merge-gatekeeper [debug] job=%s is a matrix parent (has children), ignoring it\n", name)
+			continue
+		}
 		currentJobs[name] = struct{}{}
 
 		ghaStatus := &ghaStatus{Job: name}
