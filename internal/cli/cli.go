@@ -21,8 +21,12 @@ func isDebugEnabled() bool {
 	if flagDebug {
 		return true
 	}
-	return strings.EqualFold(os.Getenv("ACTIONS_STEP_DEBUG"), "true") ||
-		strings.EqualFold(os.Getenv("ACTIONS_RUNNER_DEBUG"), "true")
+	s := os.Getenv("ACTIONS_STEP_DEBUG")
+	if strings.EqualFold(s, "true") || s == "1" {
+		return true
+	}
+	s = os.Getenv("ACTIONS_RUNNER_DEBUG")
+	return strings.EqualFold(s, "true") || s == "1"
 }
 
 func Run(version string, args ...string) error {

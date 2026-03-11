@@ -61,8 +61,9 @@ func validateCmd() *cobra.Command {
 			}
 			if isDebugEnabled() {
 				opts = append(opts, status.WithDebugLog(func(format string, args ...interface{}) {
-					// GitHub Actions: ::debug:: makes the line appear in debug output when "Enable debug logging" is on.
-					fmt.Fprintf(os.Stderr, "::debug::"+format, args...)
+					// Log with visible prefix so output shows when user passes debug: true. GitHub only shows
+					// ::debug:: when ACTIONS_STEP_DEBUG is set (repo secret), so we use a normal prefix.
+					fmt.Fprintf(os.Stderr, "[merge-gatekeeper debug] "+format, args...)
 				}))
 			}
 
