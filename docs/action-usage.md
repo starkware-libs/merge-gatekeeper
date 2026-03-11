@@ -79,4 +79,8 @@ Create a YAML file with just a single Importer Marker:
 
 With that, you can simply run `importer update FILENAME` to get the latest spec. You can also update the file used to specific branch or version.
 
+### Use with matrix strategy
+
+Merge Gatekeeper supports workflows that use a [matrix strategy](https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstrategymatrix). If any matrix job fails, Merge Gatekeeper will fail as well. For complex matrix setups where some entries are optional or expected to be skipped, use the `ignored` input to list job names (or patterns) to ignore. See [.github/workflows/issue-27.yaml](../../.github/workflows/issue-27.yaml) for an example matrix workflow.
+
 ###
