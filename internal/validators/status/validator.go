@@ -26,6 +26,7 @@ const (
 	checkRunNeutralConclusion = "neutral"
 	checkRunSuccessConclusion = "success"
 	checkRunSkipConclusion    = "skipped"
+	checkRunCancelledConclusion = "cancelled"
 )
 
 const (
@@ -301,6 +302,13 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 			ghaStatus.State = successState
 		case checkRunSkipConclusion:
 			continue
+		case checkRunCancelledConclusion:
+			// Treat as pending: we keep waiting for this job (don't fail, don't pass). Covers both:
+			// - old run cancelled by concurrency while new run hasn't started this job yet;
+			// - someone cancelled the only run → we still require a successful run before merge.
+			ghaStatus.State = pendingState
+			sv.debugf("merge-gatekeeper [debug] job=%s state=pending (conclusion=cancelled, still waiting) runs_with_same_name=%d\n",
+				name, runCountByName[name])
 		default:
 			ghaStatus.State = errorState
 			sv.debugf("merge-gatekeeper [debug] job=%s state=failed (check_run id=%v status=%s conclusion=%s) runs_with_same_name=%d\n",
