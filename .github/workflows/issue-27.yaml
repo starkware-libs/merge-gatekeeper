@@ -1,0 +1,30 @@
+---
+name: Matrix Test
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  matrix-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        m-abc:
+          - "a"
+          - "b"
+          - "c"
+          - "d"
+          - "e"
+        m-xyz:
+          - "x"
+          - "y"
+          - "z"
+      fail-fast: false
+    steps:
+      - run: |
+          echo "Running matrix based test"
+          echo
+          echo " m-abc: ${{ matrix.m-abc }}"
+          echo " m-xyz: ${{ matrix.m-xyz }}"
