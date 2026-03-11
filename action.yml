@@ -5,8 +5,9 @@ branding:
   color: orange
 inputs:
   token:
-    description: "set github token"
-    required: true
+    description: "GitHub token (defaults to github.token when omitted; or set GITHUB_TOKEN env)"
+    required: false
+    default: ${{ github.token }}
   self:
     description: "set self job name"
     required: false

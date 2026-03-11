@@ -19,8 +19,7 @@ func Run(version string, args ...string) error {
 		Short:   "Get more refined merge control",
 		Version: version,
 	}
-	cmd.PersistentFlags().StringVarP(&ghToken, "token", "t", "", "set github token")
-	cmd.MarkPersistentFlagRequired("token")
+	cmd.PersistentFlags().StringVarP(&ghToken, "token", "t", "", "GitHub token (or set GITHUB_TOKEN env)")
 
 	cmd.AddCommand(validateCmd())
 
