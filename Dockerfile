@@ -1,6 +1,6 @@
-ARG GO_VERSION=1.16.7
+ARG GO_VERSION=1.24.0
 
-FROM golang:${GO_VERSION}-alpine
+FROM public.ecr.aws/docker/library/golang:${GO_VERSION}-alpine
 
 ARG ORG=upsidr
 ARG REPO=merge-gatekeeper
