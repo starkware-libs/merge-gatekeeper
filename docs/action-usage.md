@@ -26,7 +26,7 @@ The easiest approach is to copy the standard definition, and save it under `.git
 #### With `curl`
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/upsidr/merge-gatekeeper/main/example/merge-gatekeeper.yml \
+curl -sSL https://raw.githubusercontent.com/starkware-libs/merge-gatekeeper/main/example/merge-gatekeeper.yml \
   > .github/workflows/merge-gatekeeper.yml
 ```
 
@@ -56,9 +56,9 @@ jobs:
     steps:
       - name: Run Merge Gatekeeper
         # NOTE: v1 is updated to reflect the latest v1.x.y. Please use any tag/branch that suits your needs:
-        #       https://github.com/upsidr/merge-gatekeeper/tags
-        #       https://github.com/upsidr/merge-gatekeeper/branches
-        uses: upsidr/merge-gatekeeper@v1
+        #       https://github.com/starkware-libs/merge-gatekeeper/tags
+        #       https://github.com/starkware-libs/merge-gatekeeper/branches
+        uses: starkware-libs/merge-gatekeeper@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -73,7 +73,7 @@ You can also use the latest spec by using Importer to improt directly from the s
 Create a YAML file with just a single Importer Marker:
 
 ```yaml
-# == imptr: merge-gatekeeper / begin from: https://github.com/upsidr/merge-gatekeeper/blob/main/example/definitions.yaml#[standard-setup] ==
+# == imptr: merge-gatekeeper / begin from: https://github.com/starkware-libs/merge-gatekeeper/blob/main/example/definitions.yaml#[standard-setup] ==
 # == imptr: merge-gatekeeper / end ==
 ```
 

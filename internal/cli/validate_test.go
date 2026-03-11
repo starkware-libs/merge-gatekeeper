@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/upsidr/merge-gatekeeper/internal/validators"
-	"github.com/upsidr/merge-gatekeeper/internal/validators/mock"
+	"github.com/starkware-libs/merge-gatekeeper/internal/validators"
+	"github.com/starkware-libs/merge-gatekeeper/internal/validators/mock"
 )
 
 func TestMain(m *testing.M) {
@@ -29,14 +29,14 @@ func Test_ownerAndRepository(t *testing.T) {
 			wantOwner: "",
 			wantRepo:  "",
 		},
-		"returns (upsidr, repo) when str is upsidr/repo": {
-			str:       "upsidr/repo",
-			wantOwner: "upsidr",
+		"returns (owner, repo) when str is owner/repo": {
+			str:       "owner/repo",
+			wantOwner: "owner",
 			wantRepo:  "repo",
 		},
-		"returns (upsidr, '') when str is upsidr": {
-			str:       "upsidr",
-			wantOwner: "upsidr",
+		"returns (owner, '') when str is owner": {
+			str:       "owner",
+			wantOwner: "owner",
 			wantRepo:  "",
 		},
 		"returns ('', repo) when str is /repo": {
@@ -44,9 +44,9 @@ func Test_ownerAndRepository(t *testing.T) {
 			wantOwner: "",
 			wantRepo:  "repo",
 		},
-		"returns (upsidr, repo/repo) when str is upsidr/repo/repo": {
-			str:       "upsidr/repo/repo",
-			wantOwner: "upsidr",
+		"returns (owner, repo/repo) when str is owner/repo/repo": {
+			str:       "owner/repo/repo",
+			wantOwner: "owner",
 			wantRepo:  "repo/repo",
 		},
 	}

@@ -1,4 +1,4 @@
-module github.com/upsidr/merge-gatekeeper
+module github.com/starkware-libs/merge-gatekeeper
 
 go 1.24
 
