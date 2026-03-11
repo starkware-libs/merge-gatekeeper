@@ -196,30 +196,14 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		return nil, err
 	}
 
-	// Because multiple jobs with the same name may exist when jobs are created dynamically by third-party tools, etc.,
-	// only the latest job should be managed.
-	currentJobs := make(map[string]struct{})
-
-	ghaStatuses := make([]*ghaStatus, 0, len(combined))
-	for _, s := range combined {
-		if s.Context == nil || s.State == nil {
-			return nil, fmt.Errorf("%w context: %v, status: %v", ErrInvalidCombinedStatusResponse, s.Context, s.State)
-		}
-		if _, ok := currentJobs[*s.Context]; ok {
-			continue
-		}
-		currentJobs[*s.Context] = struct{}{}
-
-		ghaStatuses = append(ghaStatuses, &ghaStatus{
-			Job:   *s.Context,
-			State: *s.State,
-		})
-	}
-
 	runResults, err := sv.listCheckRunsForRef(ctx)
 	if err != nil {
 		return nil, err
 	}
+
+	// Because multiple jobs with the same name may exist when jobs are created dynamically by third-party tools, etc.,
+	// only the latest job should be managed.
+	currentJobs := make(map[string]struct{})
 
 	// When multiple check runs share the same name (e.g. re-runs, concurrency-cancelled runs),
 	// keep the "current" one: prefer in-progress/queued over completed; if both completed, prefer highest ID (most recent).
@@ -257,6 +241,9 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		}
 	}
 
+	// Build ghaStatuses: check runs first (with latest-run logic). For any name that has check runs,
+	// we prefer check run state so in-progress isn't overwritten by stale combined status (e.g. from a cancelled run).
+	ghaStatuses := make([]*ghaStatus, 0, len(latestRunByName)+len(combined))
 	names := make([]string, 0, len(latestRunByName))
 	for name := range latestRunByName {
 		names = append(names, name)
@@ -264,9 +251,6 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	sort.Strings(names)
 	for _, name := range names {
 		run := latestRunByName[name]
-		if _, ok := currentJobs[name]; ok {
-			continue
-		}
 		currentJobs[name] = struct{}{}
 
 		ghaStatus := &ghaStatus{Job: name}
@@ -293,5 +277,22 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		ghaStatuses = append(ghaStatuses, ghaStatus)
 	}
 
+	// Then add combined status only for contexts that don't have a check run (so we don't overwrite with stale state).
+	for _, s := range combined {
+		if s.Context == nil || s.State == nil {
+			return nil, fmt.Errorf("%w context: %v, status: %v", ErrInvalidCombinedStatusResponse, s.Context, s.State)
+		}
+		if _, ok := currentJobs[*s.Context]; ok {
+			continue
+		}
+		currentJobs[*s.Context] = struct{}{}
+
+		ghaStatuses = append(ghaStatuses, &ghaStatus{
+			Job:   *s.Context,
+			State: *s.State,
+		})
+	}
+
+	sort.Slice(ghaStatuses, func(i, j int) bool { return ghaStatuses[i].Job < ghaStatuses[j].Job })
 	return ghaStatuses, nil
 }

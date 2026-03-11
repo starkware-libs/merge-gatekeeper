@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/starkware-libs/merge-gatekeeper/internal/github"
@@ -619,6 +620,9 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 						},
 					}, nil, nil
 				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{CheckRuns: []*github.CheckRun{}}, nil, nil
+				},
 			}
 			return test{
 				fields: fields{
@@ -773,6 +777,7 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 					State: successState,
 				}
 			}
+			sort.Slice(expectedGhaStatuses, func(i, j int) bool { return expectedGhaStatuses[i].Job < expectedGhaStatuses[j].Job })
 
 			c := &mock.Client{
 				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
@@ -826,6 +831,7 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 					State: successState,
 				}
 			}
+			sort.Slice(expectedGhaStatuses, func(i, j int) bool { return expectedGhaStatuses[i].Job < expectedGhaStatuses[j].Job })
 
 			c := &mock.Client{
 				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
@@ -879,6 +885,7 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 					State: successState,
 				}
 			}
+			sort.Slice(expectedGhaStatuses, func(i, j int) bool { return expectedGhaStatuses[i].Job < expectedGhaStatuses[j].Job })
 
 			c := &mock.Client{
 				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
