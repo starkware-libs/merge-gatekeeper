@@ -28,6 +28,10 @@ inputs:
     description: "set ref of github repository. the ref can be a SHA, a branch name, or tag name"
     required: false
     default: ${{ github.event.pull_request.head.sha }}
+  debug:
+    description: "enable debug logging (also auto-enabled when GitHub Actions 'Enable debug logging' is on via ACTIONS_STEP_DEBUG)"
+    required: false
+    default: "false"
 runs:
   using: "docker"
   image: "Dockerfile"
@@ -39,3 +43,4 @@ runs:
     - "--ref=${{ inputs.ref }}"
     - "--timeout=${{ inputs.timeout }}"
     - "--ignored=${{ inputs.ignored }}"
+    - "--debug=${{ inputs.debug }}"

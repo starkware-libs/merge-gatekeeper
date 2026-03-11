@@ -53,12 +53,20 @@ func validateCmd() *cobra.Command {
 				return fmt.Errorf("github owner or repository is empty. owner: %s, repository: %s", owner, repo)
 			}
 
-			statusValidator, err := status.CreateValidator(github.NewClient(ctx, token),
+			opts := []status.Option{
 				status.WithSelfJob(selfJobName),
 				status.WithGitHubOwnerAndRepo(owner, repo),
 				status.WithGitHubRef(ghRef),
 				status.WithIgnoredJobs(ignoredJobs),
-			)
+			}
+			if isDebugEnabled() {
+				opts = append(opts, status.WithDebugLog(func(format string, args ...interface{}) {
+					// GitHub Actions: ::debug:: makes the line appear in debug output when "Enable debug logging" is on.
+					fmt.Fprintf(os.Stderr, "::debug::"+format, args...)
+				}))
+			}
+
+			statusValidator, err := status.CreateValidator(github.NewClient(ctx, token), opts...)
 			if err != nil {
 				return fmt.Errorf("failed to create validator: %w", err)
 			}

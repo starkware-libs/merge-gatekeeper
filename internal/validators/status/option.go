@@ -2,6 +2,10 @@ package status
 
 import "strings"
 
+// DebugLog is called with debug messages when debug is enabled. Use fmt-style format and args.
+// In GitHub Actions, pass a function that prefixes with "::debug::" so messages show in debug output.
+type DebugLog func(format string, args ...interface{})
+
 type Option func(s *statusValidator)
 
 func WithSelfJob(name string) Option {
@@ -48,5 +52,11 @@ func WithIgnoredJobs(names string) Option {
 			jobs = append(jobs, jobName)
 		}
 		s.ignoredJobs = jobs
+	}
+}
+
+func WithDebugLog(f DebugLog) Option {
+	return func(s *statusValidator) {
+		s.debugLog = f
 	}
 }

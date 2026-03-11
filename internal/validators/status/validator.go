@@ -50,6 +50,7 @@ type statusValidator struct {
 	selfJobName string
 	ignoredJobs []string
 	client      github.Client
+	debugLog    DebugLog
 }
 
 func CreateValidator(c github.Client, opts ...Option) (validators.Validator, error) {
@@ -190,6 +191,12 @@ func (sv *statusValidator) listCheckRunsForRef(ctx context.Context) ([]*github.C
 	return runResults, nil
 }
 
+func (sv *statusValidator) debugf(format string, args ...interface{}) {
+	if sv.debugLog != nil {
+		sv.debugLog(format, args...)
+	}
+}
+
 func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, error) {
 	combined, err := sv.getCombinedStatus(ctx)
 	if err != nil {
@@ -201,6 +208,9 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		return nil, err
 	}
 
+	sv.debugf("merge-gatekeeper [debug] ref=%s owner=%s repo=%s combined_status_count=%d check_runs_count=%d\n",
+		sv.ref, sv.owner, sv.repo, len(combined), len(runResults))
+
 	// Because multiple jobs with the same name may exist when jobs are created dynamically by third-party tools, etc.,
 	// only the latest job should be managed.
 	currentJobs := make(map[string]struct{})
@@ -208,11 +218,13 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	// When multiple check runs share the same name (e.g. re-runs, concurrency-cancelled runs),
 	// keep the "current" one: prefer in-progress/queued over completed; if both completed, prefer highest ID (most recent).
 	latestRunByName := make(map[string]*github.CheckRun)
+	runCountByName := make(map[string]int)
 	for _, run := range runResults {
 		if run.Name == nil || run.Status == nil {
 			return nil, fmt.Errorf("%w name: %v, status: %v", ErrInvalidCheckRunResponse, run.Name, run.Status)
 		}
 		name := *run.Name
+		runCountByName[name]++
 		existing, ok := latestRunByName[name]
 		if !ok {
 			latestRunByName[name] = run
@@ -221,10 +233,14 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		existingInProgress := *existing.Status != checkRunCompletedStatus
 		thisInProgress := *run.Status != checkRunCompletedStatus
 		if thisInProgress && !existingInProgress {
+			sv.debugf("merge-gatekeeper [debug] job=%s: picked in_progress run id=%v (replaced completed run id=%v)\n",
+				name, run.ID, existing.ID)
 			latestRunByName[name] = run
 			continue
 		}
 		if !thisInProgress && existingInProgress {
+			sv.debugf("merge-gatekeeper [debug] job=%s: keeping in_progress run id=%v (dropped completed run id=%v)\n",
+				name, existing.ID, run.ID)
 			continue
 		}
 		// Both same completion state; keep the one with higher ID (more recent).
@@ -237,6 +253,8 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 			existingID = *existing.ID
 		}
 		if thisID > existingID {
+			sv.debugf("merge-gatekeeper [debug] job=%s: picked newer run id=%v (replaced run id=%v)\n",
+				name, run.ID, existing.ID)
 			latestRunByName[name] = run
 		}
 	}
@@ -254,16 +272,28 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		currentJobs[name] = struct{}{}
 
 		ghaStatus := &ghaStatus{Job: name}
+		statusStr := ""
+		if run.Status != nil {
+			statusStr = *run.Status
+		}
+		conclusionStr := ""
+		if run.Conclusion != nil {
+			conclusionStr = *run.Conclusion
+		}
 
 		if *run.Status != checkRunCompletedStatus {
 			ghaStatus.State = pendingState
 			ghaStatuses = append(ghaStatuses, ghaStatus)
+			sv.debugf("merge-gatekeeper [debug] job=%s state=pending (check_run id=%v status=%s) runs_with_same_name=%d\n",
+				name, run.ID, statusStr, runCountByName[name])
 			continue
 		}
 
 		if run.Conclusion == nil {
 			ghaStatus.State = errorState
 			ghaStatuses = append(ghaStatuses, ghaStatus)
+			sv.debugf("merge-gatekeeper [debug] job=%s state=error (check_run id=%v status=completed conclusion=nil)\n",
+				name, run.ID)
 			continue
 		}
 		switch *run.Conclusion {
@@ -273,6 +303,8 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 			continue
 		default:
 			ghaStatus.State = errorState
+			sv.debugf("merge-gatekeeper [debug] job=%s state=failed (check_run id=%v status=%s conclusion=%s) runs_with_same_name=%d\n",
+				name, run.ID, statusStr, conclusionStr, runCountByName[name])
 		}
 		ghaStatuses = append(ghaStatuses, ghaStatus)
 	}
@@ -283,6 +315,7 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 			return nil, fmt.Errorf("%w context: %v, status: %v", ErrInvalidCombinedStatusResponse, s.Context, s.State)
 		}
 		if _, ok := currentJobs[*s.Context]; ok {
+			sv.debugf("merge-gatekeeper [debug] skipped combined_status context=%s (using check run instead)\n", *s.Context)
 			continue
 		}
 		currentJobs[*s.Context] = struct{}{}
@@ -291,6 +324,7 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 			Job:   *s.Context,
 			State: *s.State,
 		})
+		sv.debugf("merge-gatekeeper [debug] job=%s state=%s source=combined_status\n", *s.Context, *s.State)
 	}
 
 	sort.Slice(ghaStatuses, func(i, j int) bool { return ghaStatuses[i].Job < ghaStatuses[j].Job })
