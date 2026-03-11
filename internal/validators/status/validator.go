@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/starkware-libs/merge-gatekeeper/internal/github"
 	"github.com/starkware-libs/merge-gatekeeper/internal/multierror"
@@ -168,11 +169,15 @@ func (sv *statusValidator) getCombinedStatus(ctx context.Context) ([]*github.Rep
 func (sv *statusValidator) listCheckRunsForRef(ctx context.Context) ([]*github.CheckRun, error) {
 	var runResults []*github.CheckRun
 	page := 1
+	filterAll := "all"
 	for {
-		cr, _, err := sv.client.ListCheckRunsForRef(ctx, sv.owner, sv.repo, sv.ref, &github.ListCheckRunsOptions{ListOptions: github.ListOptions{
-			Page:    page,
-			PerPage: maxCheckRunsPerPage,
-		}})
+		cr, _, err := sv.client.ListCheckRunsForRef(ctx, sv.owner, sv.repo, sv.ref, &github.ListCheckRunsOptions{
+			ListOptions: github.ListOptions{
+				Page:    page,
+				PerPage: maxCheckRunsPerPage,
+			},
+			Filter: &filterAll,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -216,18 +221,55 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		return nil, err
 	}
 
+	// When multiple check runs share the same name (e.g. re-runs, concurrency-cancelled runs),
+	// keep the "current" one: prefer in-progress/queued over completed; if both completed, prefer highest ID (most recent).
+	latestRunByName := make(map[string]*github.CheckRun)
 	for _, run := range runResults {
 		if run.Name == nil || run.Status == nil {
 			return nil, fmt.Errorf("%w name: %v, status: %v", ErrInvalidCheckRunResponse, run.Name, run.Status)
 		}
-		if _, ok := currentJobs[*run.Name]; ok {
+		name := *run.Name
+		existing, ok := latestRunByName[name]
+		if !ok {
+			latestRunByName[name] = run
 			continue
 		}
-		currentJobs[*run.Name] = struct{}{}
-
-		ghaStatus := &ghaStatus{
-			Job: *run.Name,
+		existingInProgress := *existing.Status != checkRunCompletedStatus
+		thisInProgress := *run.Status != checkRunCompletedStatus
+		if thisInProgress && !existingInProgress {
+			latestRunByName[name] = run
+			continue
 		}
+		if !thisInProgress && existingInProgress {
+			continue
+		}
+		// Both same completion state; keep the one with higher ID (more recent).
+		thisID := int64(0)
+		if run.ID != nil {
+			thisID = *run.ID
+		}
+		existingID := int64(0)
+		if existing.ID != nil {
+			existingID = *existing.ID
+		}
+		if thisID > existingID {
+			latestRunByName[name] = run
+		}
+	}
+
+	names := make([]string, 0, len(latestRunByName))
+	for name := range latestRunByName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		run := latestRunByName[name]
+		if _, ok := currentJobs[name]; ok {
+			continue
+		}
+		currentJobs[name] = struct{}{}
+
+		ghaStatus := &ghaStatus{Job: name}
 
 		if *run.Status != checkRunCompletedStatus {
 			ghaStatus.State = pendingState
@@ -235,6 +277,11 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 			continue
 		}
 
+		if run.Conclusion == nil {
+			ghaStatus.State = errorState
+			ghaStatuses = append(ghaStatuses, ghaStatus)
+			continue
+		}
 		switch *run.Conclusion {
 		case checkRunNeutralConclusion, checkRunSuccessConclusion:
 			ghaStatus.State = successState
