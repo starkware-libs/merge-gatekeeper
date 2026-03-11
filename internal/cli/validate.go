@@ -40,12 +40,20 @@ func validateCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
+			token := ghToken
+			if token == "" {
+				token = os.Getenv("GITHUB_TOKEN")
+			}
+			if token == "" {
+				return fmt.Errorf("github token is required: set --token or GITHUB_TOKEN environment variable")
+			}
+
 			owner, repo := ownerAndRepository(ghRepo)
 			if len(owner) == 0 || len(repo) == 0 {
 				return fmt.Errorf("github owner or repository is empty. owner: %s, repository: %s", owner, repo)
 			}
 
-			statusValidator, err := status.CreateValidator(github.NewClient(ctx, ghToken),
+			statusValidator, err := status.CreateValidator(github.NewClient(ctx, token),
 				status.WithSelfJob(selfJobName),
 				status.WithGitHubOwnerAndRepo(owner, repo),
 				status.WithGitHubRef(ghRef),
