@@ -533,8 +533,8 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	}
 
 	// Then add combined status only for contexts that don't have a check run (so we don't overwrite with stale state).
-	// NOTE: The GitHub combined status API returns statuses most-recent-first per context,
-	// so first-wins dedup via currentJobs is correct — it keeps the latest status for each context.
+	// The combined status API already returns only the latest status per context, so currentJobs
+	// just prevents a combined status from overriding a check run for the same context name.
 	for _, s := range combined {
 		if s.Context == nil || s.State == nil {
 			return nil, fmt.Errorf("%w context: %v, status: %v", ErrInvalidCombinedStatusResponse, s.Context, s.State)
