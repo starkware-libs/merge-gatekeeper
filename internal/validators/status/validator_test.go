@@ -21,6 +21,10 @@ func int64Ptr(i int64) *int64 {
 	return &i
 }
 
+func intPtr(i int) *int {
+	return &i
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -1260,6 +1264,448 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 				want: []*ghaStatus{
 					{Job: "lint", State: cancelledState},
 					{Job: "test", State: successState},
+				},
+			}
+		}(),
+		"superseded suite: cancelled checks converted to pending when superseding run in-progress": func() test {
+			// Old run (suite 100, workflow 1) was cancelled. New run (suite 200, workflow 1) is in-progress.
+			// "test" only exists in the old suite — should be converted to pending, not hard-fail.
+			c := &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:         int64Ptr(1),
+								Name:       stringPtr("build"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunCancelledConclusion),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(100)},
+							},
+							{
+								ID:         int64Ptr(2),
+								Name:       stringPtr("test"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunCancelledConclusion),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(100)},
+							},
+							{
+								ID:         int64Ptr(3),
+								Name:       stringPtr("build"),
+								Status:     stringPtr("in_progress"),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(200)},
+							},
+						},
+					}, nil, nil
+				},
+				ListRepositoryWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					wfID := int64(1)
+					total := 2
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{ID: int64Ptr(10), WorkflowID: &wfID, RunNumber: intPtr(1), RunAttempt: intPtr(1), CheckSuiteID: int64Ptr(100), Status: stringPtr("completed"), Conclusion: stringPtr("cancelled")},
+							{ID: int64Ptr(11), WorkflowID: &wfID, RunNumber: intPtr(2), RunAttempt: intPtr(1), CheckSuiteID: int64Ptr(200), Status: stringPtr("in_progress")},
+						},
+					}, nil, nil
+				},
+			}
+			return test{
+				fields: fields{
+					client:      c,
+					selfJobName: "self-job",
+					owner:       "test-owner",
+					repo:        "test-repo",
+					ref:         "main",
+				},
+				wantErr: false,
+				want: []*ghaStatus{
+					{Job: "build", State: pendingState},  // dedup picks suite 200 (in-progress)
+					{Job: "test", State: pendingState},    // converted from cancelled (superseded suite, superseding run in-progress)
+				},
+			}
+		}(),
+		"superseded suite: cancelled checks dropped when superseding run completed": func() test {
+			// Old run (suite 100) cancelled, new run (suite 200) completed successfully.
+			// "test" only in old suite — should be dropped (new run decided not to run it).
+			c := &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:         int64Ptr(1),
+								Name:       stringPtr("build"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunCancelledConclusion),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(100)},
+							},
+							{
+								ID:         int64Ptr(2),
+								Name:       stringPtr("test"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunCancelledConclusion),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(100)},
+							},
+							{
+								ID:         int64Ptr(3),
+								Name:       stringPtr("build"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(200)},
+							},
+						},
+					}, nil, nil
+				},
+				ListRepositoryWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					wfID := int64(1)
+					total := 2
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{ID: int64Ptr(10), WorkflowID: &wfID, RunNumber: intPtr(1), RunAttempt: intPtr(1), CheckSuiteID: int64Ptr(100), Status: stringPtr("completed"), Conclusion: stringPtr("cancelled")},
+							{ID: int64Ptr(11), WorkflowID: &wfID, RunNumber: intPtr(2), RunAttempt: intPtr(1), CheckSuiteID: int64Ptr(200), Status: stringPtr("completed"), Conclusion: stringPtr("success")},
+						},
+					}, nil, nil
+				},
+			}
+			return test{
+				fields: fields{
+					client:      c,
+					selfJobName: "self-job",
+					owner:       "test-owner",
+					repo:        "test-repo",
+					ref:         "main",
+				},
+				wantErr: false,
+				want: []*ghaStatus{
+					{Job: "build", State: successState}, // dedup picks suite 200 (success)
+					// "test" dropped — superseded suite, superseding run completed
+				},
+			}
+		}(),
+		"superseded suite: success checks from old suite kept (re-run failed jobs)": func() test {
+			// Old run (suite 100): build=success, test=failure. Re-run (suite 200): test=in-progress.
+			// build=success from old suite should be kept (not re-run in new attempt).
+			c := &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:         int64Ptr(1),
+								Name:       stringPtr("build"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(100)},
+							},
+							{
+								ID:         int64Ptr(2),
+								Name:       stringPtr("test"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr("failure"),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(100)},
+							},
+							{
+								ID:         int64Ptr(3),
+								Name:       stringPtr("test"),
+								Status:     stringPtr("in_progress"),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(200)},
+							},
+						},
+					}, nil, nil
+				},
+				ListRepositoryWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					wfID := int64(1)
+					total := 2
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{ID: int64Ptr(10), WorkflowID: &wfID, RunNumber: intPtr(1), RunAttempt: intPtr(1), CheckSuiteID: int64Ptr(100), Status: stringPtr("completed"), Conclusion: stringPtr("failure")},
+							{ID: int64Ptr(11), WorkflowID: &wfID, RunNumber: intPtr(1), RunAttempt: intPtr(2), CheckSuiteID: int64Ptr(200), Status: stringPtr("in_progress")},
+						},
+					}, nil, nil
+				},
+			}
+			return test{
+				fields: fields{
+					client:      c,
+					selfJobName: "self-job",
+					owner:       "test-owner",
+					repo:        "test-repo",
+					ref:         "main",
+				},
+				wantErr: false,
+				want: []*ghaStatus{
+					{Job: "build", State: successState}, // kept from superseded suite (success)
+					{Job: "test", State: pendingState},  // dedup picks suite 200 (in-progress)
+				},
+			}
+		}(),
+		"superseded suite: single suite skips workflow runs API": func() test {
+			// Only one suite — no workflow runs API call should be made.
+			// ListRepositoryWorkflowRunsFunc panics if called, proving it's not invoked.
+			c := &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:         int64Ptr(1),
+								Name:       stringPtr("build"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(100)},
+							},
+							{
+								ID:         int64Ptr(2),
+								Name:       stringPtr("test"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(100)},
+							},
+						},
+					}, nil, nil
+				},
+				ListRepositoryWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					panic("ListRepositoryWorkflowRuns should not be called for single suite")
+				},
+			}
+			return test{
+				fields: fields{
+					client:      c,
+					selfJobName: "self-job",
+					owner:       "test-owner",
+					repo:        "test-repo",
+					ref:         "main",
+				},
+				wantErr: false,
+				want: []*ghaStatus{
+					{Job: "build", State: successState},
+					{Job: "test", State: successState},
+				},
+			}
+		}(),
+		"superseded suite: multi-workflow no cross-contamination": func() test {
+			// ci.yml (workflow 1): suite 100 cancelled, suite 200 in-progress.
+			// deploy.yml (workflow 2): suite 150, running independently.
+			// Suite 150 should NOT be marked superseded by suite 200 (different workflow).
+			c := &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:         int64Ptr(1),
+								Name:       stringPtr("build"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunCancelledConclusion),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(100)},
+							},
+							{
+								ID:         int64Ptr(2),
+								Name:       stringPtr("build"),
+								Status:     stringPtr("in_progress"),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(200)},
+							},
+							{
+								ID:         int64Ptr(3),
+								Name:       stringPtr("deploy"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunCancelledConclusion),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(150)},
+							},
+						},
+					}, nil, nil
+				},
+				ListRepositoryWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					wf1 := int64(1) // ci.yml
+					wf2 := int64(2) // deploy.yml
+					total := 3
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{ID: int64Ptr(10), WorkflowID: &wf1, RunNumber: intPtr(1), RunAttempt: intPtr(1), CheckSuiteID: int64Ptr(100), Status: stringPtr("completed"), Conclusion: stringPtr("cancelled")},
+							{ID: int64Ptr(11), WorkflowID: &wf1, RunNumber: intPtr(2), RunAttempt: intPtr(1), CheckSuiteID: int64Ptr(200), Status: stringPtr("in_progress")},
+							{ID: int64Ptr(12), WorkflowID: &wf2, RunNumber: intPtr(1), RunAttempt: intPtr(1), CheckSuiteID: int64Ptr(150), Status: stringPtr("completed"), Conclusion: stringPtr("cancelled")},
+						},
+					}, nil, nil
+				},
+			}
+			return test{
+				fields: fields{
+					client:      c,
+					selfJobName: "self-job",
+					owner:       "test-owner",
+					repo:        "test-repo",
+					ref:         "main",
+				},
+				wantErr: false,
+				want: []*ghaStatus{
+					{Job: "build", State: pendingState},     // dedup picks suite 200 (in-progress)
+					{Job: "deploy", State: cancelledState},  // suite 150 NOT superseded (only run of workflow 2, and it's cancelled)
+				},
+			}
+		}(),
+		"superseded suite: all runs cancelled, nothing superseded": func() test {
+			// Both runs of the same workflow are cancelled. Nothing is superseded.
+			// Cancelled checks pass through to the existing hard-fail path.
+			c := &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:         int64Ptr(1),
+								Name:       stringPtr("build"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunCancelledConclusion),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(100)},
+							},
+							{
+								ID:         int64Ptr(2),
+								Name:       stringPtr("build"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunCancelledConclusion),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(200)},
+							},
+						},
+					}, nil, nil
+				},
+				ListRepositoryWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					wfID := int64(1)
+					total := 2
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{ID: int64Ptr(10), WorkflowID: &wfID, RunNumber: intPtr(1), RunAttempt: intPtr(1), CheckSuiteID: int64Ptr(100), Status: stringPtr("completed"), Conclusion: stringPtr("cancelled")},
+							{ID: int64Ptr(11), WorkflowID: &wfID, RunNumber: intPtr(2), RunAttempt: intPtr(1), CheckSuiteID: int64Ptr(200), Status: stringPtr("completed"), Conclusion: stringPtr("cancelled")},
+						},
+					}, nil, nil
+				},
+			}
+			return test{
+				fields: fields{
+					client:      c,
+					selfJobName: "self-job",
+					owner:       "test-owner",
+					repo:        "test-repo",
+					ref:         "main",
+				},
+				wantErr: false,
+				want: []*ghaStatus{
+					{Job: "build", State: cancelledState}, // dedup picks suite 200 (higher), still cancelled
+				},
+			}
+		}(),
+		"superseded suite: workflow runs API failure returns error": func() test {
+			// API failure should propagate as an error (actions: read is required).
+			c := &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:         int64Ptr(1),
+								Name:       stringPtr("build"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunCancelledConclusion),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(100)},
+							},
+							{
+								ID:         int64Ptr(2),
+								Name:       stringPtr("build"),
+								Status:     stringPtr("in_progress"),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(200)},
+							},
+						},
+					}, nil, nil
+				},
+				ListRepositoryWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					return nil, nil, errors.New("403 Forbidden: requires actions: read permission")
+				},
+			}
+			return test{
+				fields: fields{
+					client:      c,
+					selfJobName: "self-job",
+					owner:       "test-owner",
+					repo:        "test-repo",
+					ref:         "main",
+				},
+				wantErr: true,
+			}
+		}(),
+		"superseded suite: third-party checks without suite unaffected": func() test {
+			// Third-party checks (no CheckSuite) should not be affected by the pre-filter.
+			c := &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:         int64Ptr(1),
+								Name:       stringPtr("ci/external"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunCancelledConclusion),
+								// No CheckSuite
+							},
+							{
+								ID:         int64Ptr(2),
+								Name:       stringPtr("build"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunCancelledConclusion),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(100)},
+							},
+							{
+								ID:         int64Ptr(3),
+								Name:       stringPtr("build"),
+								Status:     stringPtr("in_progress"),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(200)},
+							},
+						},
+					}, nil, nil
+				},
+				ListRepositoryWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
+					wfID := int64(1)
+					total := 2
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{ID: int64Ptr(10), WorkflowID: &wfID, RunNumber: intPtr(1), RunAttempt: intPtr(1), CheckSuiteID: int64Ptr(100), Status: stringPtr("completed"), Conclusion: stringPtr("cancelled")},
+							{ID: int64Ptr(11), WorkflowID: &wfID, RunNumber: intPtr(2), RunAttempt: intPtr(1), CheckSuiteID: int64Ptr(200), Status: stringPtr("in_progress")},
+						},
+					}, nil, nil
+				},
+			}
+			return test{
+				fields: fields{
+					client:      c,
+					selfJobName: "self-job",
+					owner:       "test-owner",
+					repo:        "test-repo",
+					ref:         "main",
+				},
+				wantErr: false,
+				want: []*ghaStatus{
+					{Job: "build", State: pendingState},        // dedup picks suite 200 (in-progress)
+					{Job: "ci/external", State: cancelledState}, // third-party, unaffected by pre-filter
 				},
 			}
 		}(),
