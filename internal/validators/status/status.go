@@ -3,11 +3,12 @@ package status
 import "fmt"
 
 type status struct {
-	totalJobs    []string
-	completeJobs []string
-	errJobs      []string
-	ignoredJobs  []string
-	succeeded    bool
+	totalJobs     []string
+	completeJobs  []string
+	errJobs       []string
+	cancelledJobs []string
+	ignoredJobs   []string
+	succeeded     bool
 }
 
 func prettyPrintJobList(jobs []string) string {
@@ -33,6 +34,7 @@ Total job count:       %d
 Completed job count:   %d
 Incompleted job count: %d
 Failed job count:      %d
+Cancelled job count:   %d
 Ignored job count:     %d
 `,
 		len(s.completeJobs), len(s.totalJobs),
@@ -40,6 +42,7 @@ Ignored job count:     %d
 		len(s.completeJobs),
 		len(s.getIncompleteJobs()),
 		len(s.errJobs),
+		len(s.cancelledJobs),
 		len(s.ignoredJobs),
 	)
 
@@ -56,6 +59,10 @@ Ignored job count:     %d
 %s
 ::endgroup::
 
+::group::Cancelled jobs
+%s
+::endgroup::
+
 ::group::Ignored jobs
 %s
 ::endgroup::
@@ -68,6 +75,7 @@ Ignored job count:     %d
 		prettyPrintJobList(s.errJobs),
 		prettyPrintJobList(s.completeJobs),
 		prettyPrintJobList(s.getIncompleteJobs()),
+		prettyPrintJobList(s.cancelledJobs),
 		prettyPrintJobList(s.ignoredJobs),
 		prettyPrintJobList(s.totalJobs),
 	)
@@ -94,6 +102,13 @@ func (s *status) getIncompleteJobs() []string {
 
 		for _, failed := range s.errJobs {
 			if job == failed {
+				found = true
+				break
+			}
+		}
+
+		for _, cancelled := range s.cancelledJobs {
+			if job == cancelled {
 				found = true
 				break
 			}

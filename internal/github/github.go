@@ -24,6 +24,7 @@ type (
 
 type (
 	CheckRun             = github.CheckRun
+	CheckSuite           = github.CheckSuite
 	ListCheckRunsOptions = github.ListCheckRunsOptions
 	ListCheckRunsResults = github.ListCheckRunsResults
 )

@@ -17,6 +17,10 @@ func stringPtr(str string) *string {
 	return &str
 }
 
+func int64Ptr(i int64) *int64 {
+	return &i
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -182,11 +186,12 @@ func Test_statusValidator_Validate(t *testing.T) {
 			},
 			wantErr: false,
 			wantStatus: &status{
-				succeeded:    true,
-				totalJobs:    []string{},
-				completeJobs: []string{},
-				ignoredJobs:  []string{},
-				errJobs:      []string{},
+				succeeded:     true,
+				totalJobs:     []string{},
+				completeJobs:  []string{},
+				errJobs:       []string{},
+				cancelledJobs: []string{},
+				ignoredJobs:   []string{},
 			},
 		},
 		"returns succeeded status and nil when there is one job, which is itself": {
@@ -208,11 +213,12 @@ func Test_statusValidator_Validate(t *testing.T) {
 			},
 			wantErr: false,
 			wantStatus: &status{
-				succeeded:    true,
-				totalJobs:    []string{},
-				completeJobs: []string{},
-				ignoredJobs:  []string{},
-				errJobs:      []string{},
+				succeeded:     true,
+				totalJobs:     []string{},
+				completeJobs:  []string{},
+				errJobs:       []string{},
+				cancelledJobs: []string{},
+				ignoredJobs:   []string{},
 			},
 		},
 		"returns failed status and nil when there is one job": {
@@ -233,11 +239,12 @@ func Test_statusValidator_Validate(t *testing.T) {
 			},
 			wantErr: false,
 			wantStatus: &status{
-				succeeded:    false,
-				totalJobs:    []string{"job"},
-				completeJobs: []string{},
-				ignoredJobs:  []string{},
-				errJobs:      []string{},
+				succeeded:     false,
+				totalJobs:     []string{"job"},
+				completeJobs:  []string{},
+				errJobs:       []string{},
+				cancelledJobs: []string{},
+				ignoredJobs:   []string{},
 			},
 		},
 		"returns error when there is a failed job": {
@@ -276,7 +283,8 @@ func Test_statusValidator_Validate(t *testing.T) {
 				errJobs: []string{
 					"job-02",
 				},
-				ignoredJobs: []string{},
+				cancelledJobs: []string{},
+				ignoredJobs:   []string{},
 			}).Detail(),
 		},
 		"returns error when there is a failed job with failure state": {
@@ -315,7 +323,8 @@ func Test_statusValidator_Validate(t *testing.T) {
 				errJobs: []string{
 					"job-02",
 				},
-				ignoredJobs: []string{},
+				cancelledJobs: []string{},
+				ignoredJobs:   []string{},
 			}).Detail(),
 		},
 		"returns failed status and nil when successful job count is less than total": {
@@ -353,8 +362,9 @@ func Test_statusValidator_Validate(t *testing.T) {
 				completeJobs: []string{
 					"job-01",
 				},
-				errJobs:     []string{},
-				ignoredJobs: []string{},
+				errJobs:       []string{},
+				cancelledJobs: []string{},
+				ignoredJobs:   []string{},
 			},
 		},
 		"returns succeeded status and nil when validation is success": {
@@ -393,8 +403,9 @@ func Test_statusValidator_Validate(t *testing.T) {
 					"job-01",
 					"job-02",
 				},
-				errJobs:     []string{},
-				ignoredJobs: []string{},
+				errJobs:       []string{},
+				cancelledJobs: []string{},
+				ignoredJobs:   []string{},
 			},
 		},
 		"returns succeeded status and nil when only an ignored job is failing": {
@@ -425,11 +436,12 @@ func Test_statusValidator_Validate(t *testing.T) {
 			},
 			wantErr: false,
 			wantStatus: &status{
-				succeeded:    true,
-				totalJobs:    []string{"job-01"},
-				completeJobs: []string{"job-01"},
-				errJobs:      []string{},
-				ignoredJobs:  []string{"job-02", "job-03"},
+				succeeded:     true,
+				totalJobs:     []string{"job-01"},
+				completeJobs:  []string{"job-01"},
+				errJobs:       []string{},
+				cancelledJobs: []string{},
+				ignoredJobs:   []string{"job-02", "job-03"},
 			},
 		},
 		"returns succeeded status and nil when only an ignored job is failing, with failure state": {
@@ -460,11 +472,12 @@ func Test_statusValidator_Validate(t *testing.T) {
 			},
 			wantErr: false,
 			wantStatus: &status{
-				succeeded:    true,
-				totalJobs:    []string{"job-01"},
-				completeJobs: []string{"job-01"},
-				errJobs:      []string{},
-				ignoredJobs:  []string{"job-02", "job-03"},
+				succeeded:     true,
+				totalJobs:     []string{"job-01"},
+				completeJobs:  []string{"job-01"},
+				errJobs:       []string{},
+				cancelledJobs: []string{},
+				ignoredJobs:   []string{"job-02", "job-03"},
 			},
 		},
 	}
@@ -915,6 +928,304 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 				},
 				wantErr: false,
 				want:    expectedGhaStatuses,
+			}
+		}(),
+		"ignores matrix parent in cancelled state when children exist": func() test {
+			c := &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:         int64Ptr(1),
+								Name:       stringPtr("build"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunCancelledConclusion),
+							},
+							{
+								ID:         int64Ptr(2),
+								Name:       stringPtr("build (ubuntu)"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+							},
+							{
+								ID:         int64Ptr(3),
+								Name:       stringPtr("build (macos)"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+							},
+						},
+					}, nil, nil
+				},
+			}
+			return test{
+				fields: fields{
+					client:      c,
+					selfJobName: "self-job",
+					owner:       "test-owner",
+					repo:        "test-repo",
+					ref:         "main",
+				},
+				wantErr: false,
+				want: []*ghaStatus{
+					{Job: "build (macos)", State: successState},
+					{Job: "build (ubuntu)", State: successState},
+				},
+			}
+		}(),
+		"ignores matrix parent stuck in-progress when children succeed": func() test {
+			c := &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:     int64Ptr(1),
+								Name:   stringPtr("build"),
+								Status: stringPtr("in_progress"),
+							},
+							{
+								ID:         int64Ptr(2),
+								Name:       stringPtr("build (ubuntu)"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+							},
+							{
+								ID:         int64Ptr(3),
+								Name:       stringPtr("build (macos)"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+							},
+						},
+					}, nil, nil
+				},
+			}
+			return test{
+				fields: fields{
+					client:      c,
+					selfJobName: "self-job",
+					owner:       "test-owner",
+					repo:        "test-repo",
+					ref:         "main",
+				},
+				wantErr: false,
+				want: []*ghaStatus{
+					{Job: "build (macos)", State: successState},
+					{Job: "build (ubuntu)", State: successState},
+				},
+			}
+		}(),
+		"includes matrix parent with successful terminal state": func() test {
+			c := &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:         int64Ptr(1),
+								Name:       stringPtr("build"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+							},
+							{
+								ID:         int64Ptr(2),
+								Name:       stringPtr("build (ubuntu)"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+							},
+							{
+								ID:         int64Ptr(3),
+								Name:       stringPtr("build (macos)"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+							},
+						},
+					}, nil, nil
+				},
+			}
+			return test{
+				fields: fields{
+					client:      c,
+					selfJobName: "self-job",
+					owner:       "test-owner",
+					repo:        "test-repo",
+					ref:         "main",
+				},
+				wantErr: false,
+				want: []*ghaStatus{
+					{Job: "build", State: successState},
+					{Job: "build (macos)", State: successState},
+					{Job: "build (ubuntu)", State: successState},
+				},
+			}
+		}(),
+		"does not ignore falsely detected matrix parent with failure": func() test {
+			// "deploy" and "deploy (staging)" are independent jobs, not a matrix.
+			// "deploy" should NOT be silently dropped just because its name is a
+			// prefix of "deploy (staging)".
+			c := &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:         int64Ptr(1),
+								Name:       stringPtr("deploy"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr("failure"),
+							},
+							{
+								ID:         int64Ptr(2),
+								Name:       stringPtr("deploy (staging)"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+							},
+						},
+					}, nil, nil
+				},
+			}
+			return test{
+				fields: fields{
+					client:      c,
+					selfJobName: "self-job",
+					owner:       "test-owner",
+					repo:        "test-repo",
+					ref:         "main",
+				},
+				wantErr: false,
+				want: []*ghaStatus{
+					{Job: "deploy", State: errorState},
+					{Job: "deploy (staging)", State: successState},
+				},
+			}
+		}(),
+		"dedup prefers newer check suite over higher run ID": func() test {
+			// Run A (suite 5000) is cancelled mid-flight; its job "test" got run ID 200.
+			// Run B (suite 5001) replaces it; its job "test" got run ID 150 (started earlier
+			// on a runner due to scheduling). Suite-based dedup should pick Run B's check.
+			c := &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:         int64Ptr(200),
+								Name:       stringPtr("test"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunCancelledConclusion),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(5000)},
+							},
+							{
+								ID:         int64Ptr(150),
+								Name:       stringPtr("test"),
+								Status:     stringPtr("in_progress"),
+								CheckSuite: &github.CheckSuite{ID: int64Ptr(5001)},
+							},
+						},
+					}, nil, nil
+				},
+			}
+			return test{
+				fields: fields{
+					client:      c,
+					selfJobName: "self-job",
+					owner:       "test-owner",
+					repo:        "test-repo",
+					ref:         "main",
+				},
+				wantErr: false,
+				want: []*ghaStatus{
+					{Job: "test", State: pendingState}, // in_progress → pending
+				},
+			}
+		}(),
+		"dedup falls back to run ID when no check suite present": func() test {
+			// Third-party integrations may not populate CheckSuite.
+			// Dedup should fall back to run ID comparison.
+			c := &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:         int64Ptr(10),
+								Name:       stringPtr("lint"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr("failure"),
+							},
+							{
+								ID:         int64Ptr(20),
+								Name:       stringPtr("lint"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+							},
+						},
+					}, nil, nil
+				},
+			}
+			return test{
+				fields: fields{
+					client:      c,
+					selfJobName: "self-job",
+					owner:       "test-owner",
+					repo:        "test-repo",
+					ref:         "main",
+				},
+				wantErr: false,
+				want: []*ghaStatus{
+					{Job: "lint", State: successState}, // higher run ID wins
+				},
+			}
+		}(),
+		"standalone cancelled check run reports cancelled state": func() test {
+			c := &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:         int64Ptr(1),
+								Name:       stringPtr("lint"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunCancelledConclusion),
+							},
+							{
+								ID:         int64Ptr(2),
+								Name:       stringPtr("test"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+							},
+						},
+					}, nil, nil
+				},
+			}
+			return test{
+				fields: fields{
+					client:      c,
+					selfJobName: "self-job",
+					owner:       "test-owner",
+					repo:        "test-repo",
+					ref:         "main",
+				},
+				wantErr: false,
+				want: []*ghaStatus{
+					{Job: "lint", State: cancelledState},
+					{Job: "test", State: successState},
+				},
 			}
 		}(),
 	}
