@@ -29,6 +29,7 @@ Total job count:       3
 Completed job count:   1
 Incompleted job count: 1
 Failed job count:      1
+Cancelled job count:   0
 Ignored job count:     0
 
 ::group::Failed jobs
@@ -41,6 +42,10 @@ Ignored job count:     0
 
 ::group::Incomplete jobs
 - job-1
+::endgroup::
+
+::group::Cancelled jobs
+[]
 ::endgroup::
 
 ::group::Ignored jobs
@@ -79,6 +84,7 @@ Total job count:       4
 Completed job count:   2
 Incompleted job count: 1
 Failed job count:      1
+Cancelled job count:   0
 Ignored job count:     1
 
 ::group::Failed jobs
@@ -92,6 +98,10 @@ Ignored job count:     1
 
 ::group::Incomplete jobs
 - job-1
+::endgroup::
+
+::group::Cancelled jobs
+[]
 ::endgroup::
 
 ::group::Ignored jobs
@@ -117,6 +127,7 @@ Total job count:       0
 Completed job count:   0
 Incompleted job count: 0
 Failed job count:      0
+Cancelled job count:   0
 Ignored job count:     0
 
 ::group::Failed jobs
@@ -128,6 +139,10 @@ Ignored job count:     0
 ::endgroup::
 
 ::group::Incomplete jobs
+[]
+::endgroup::
+
+::group::Cancelled jobs
 []
 ::endgroup::
 
