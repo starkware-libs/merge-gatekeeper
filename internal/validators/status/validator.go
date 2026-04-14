@@ -212,6 +212,9 @@ func (sv *statusValidator) listWorkflowRunsForRef(ctx context.Context) ([]*githu
 		if err != nil {
 			return nil, err
 		}
+		if len(wr.WorkflowRuns) == 0 {
+			break
+		}
 		runs = append(runs, wr.WorkflowRuns...)
 		if wr.GetTotalCount() <= len(runs) {
 			break
@@ -343,12 +346,14 @@ func (sv *statusValidator) filterSupersededRuns(ctx context.Context, runResults 
 
 		if supersedingStatus != checkRunCompletedStatus {
 			// Superseding run is still in progress — convert to pending.
+			// Clone the check run to avoid mutating the original.
 			pendingStatus := "queued"
-			run.Status = &pendingStatus
-			run.Conclusion = nil
+			converted := *run
+			converted.Status = &pendingStatus
+			converted.Conclusion = nil
 			sv.debugf("merge-gatekeeper [debug] job=%s: converted to pending (superseded suite %d, superseding run %s)\n",
 				name, suiteID, supersedingStatus)
-			filtered = append(filtered, run)
+			filtered = append(filtered, &converted)
 		} else {
 			// Superseding run completed — drop the stale check.
 			sv.debugf("merge-gatekeeper [debug] job=%s: dropped from superseded suite %d (superseding run completed)\n",
