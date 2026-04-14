@@ -95,8 +95,6 @@ func validateCmd() *cobra.Command {
 func ownerAndRepository(str string) (owner string, repo string) {
 	sp := strings.Split(str, "/")
 	switch len(sp) {
-	case 0:
-		return "", ""
 	case 1:
 		return sp[0], ""
 	case 2:
@@ -153,7 +151,7 @@ func validate(ctx context.Context, v validators.Validator, logger logger) (bool,
 
 	st, err := v.Validate(ctx)
 	if err != nil {
-		return false, fmt.Errorf("validation failed, err: %v", err)
+		return false, fmt.Errorf("validation failed: %w", err)
 	}
 
 	logger.Println(st.Detail())

@@ -4,7 +4,7 @@ REPO=starkware-libs/merge-gatekeeper
 IGNORED=""
 
 go-build:
-	GO111MODULE=on LANG=en_US.UTF-8 CGO_ENABLED=0 go build ./cmd/merge-gatekeeper
+	GO111MODULE=on LANG=en_US.UTF-8 CGO_ENABLED=0 go build .
 
 go-run: go-build
 	./merge-gatekeeper validate --token=$(TOKEN) --ref $(REF) --repo $(REPO) --ignored "$(IGNORED)"

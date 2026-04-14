@@ -37,9 +37,8 @@ func WithGitHubRef(ref string) Option {
 
 func WithIgnoredJobs(names string) Option {
 	return func(s *statusValidator) {
-		// TODO: Add more input validation, such as "," should not be a valid input.
 		if len(names) == 0 {
-			return // TODO: Return some clearer error
+			return // No ignored jobs specified
 		}
 
 		jobs := []string{}
@@ -47,7 +46,7 @@ func WithIgnoredJobs(names string) Option {
 		for _, s := range ss {
 			jobName := strings.TrimSpace(s)
 			if len(jobName) == 0 {
-				continue // TODO: Provide more clue to users
+				continue
 			}
 			jobs = append(jobs, jobName)
 		}
