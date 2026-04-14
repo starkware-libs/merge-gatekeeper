@@ -93,7 +93,12 @@ func withRetry[T any](ctx context.Context, maxRetries int, initialDelay time.Dur
 		if errors.Is(err, context.DeadlineExceeded) {
 			return zero, lastResp, err
 		}
-		if resp == nil || resp.StatusCode < 500 || resp.StatusCode > 599 {
+		if resp == nil {
+			return zero, lastResp, err
+		}
+		// Retry on 5xx and 403 rate-limit responses.
+		isRateLimit := resp.StatusCode == 403 && resp.Header.Get("X-RateLimit-Remaining") == "0"
+		if !isRateLimit && (resp.StatusCode < 500 || resp.StatusCode > 599) {
 			return zero, lastResp, err
 		}
 		if attempt == maxRetries-1 {
