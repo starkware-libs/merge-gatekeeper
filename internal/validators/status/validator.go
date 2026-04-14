@@ -144,7 +144,7 @@ func (sv *statusValidator) Validate(ctx context.Context) (validators.Status, err
 			st.cancelledJobs = append(st.cancelledJobs, ghaStatus.Job)
 		}
 	}
-	if len(st.errJobs) != 0 {
+	if len(st.errJobs) != 0 || len(st.cancelledJobs) != 0 {
 		return nil, errors.New(st.Detail())
 	}
 
@@ -165,7 +165,7 @@ func (sv *statusValidator) getCombinedStatus(ctx context.Context) ([]*github.Rep
 			return nil, err
 		}
 		combined = append(combined, c.Statuses...)
-		if c.GetTotalCount() < maxStatusesPerPage {
+		if c.GetTotalCount() <= len(combined) {
 			break
 		}
 		page++
@@ -361,6 +361,8 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	}
 
 	// Then add combined status only for contexts that don't have a check run (so we don't overwrite with stale state).
+	// NOTE: The GitHub combined status API returns statuses most-recent-first per context,
+	// so first-wins dedup via currentJobs is correct — it keeps the latest status for each context.
 	for _, s := range combined {
 		if s.Context == nil || s.State == nil {
 			return nil, fmt.Errorf("%w context: %v, status: %v", ErrInvalidCombinedStatusResponse, s.Context, s.State)

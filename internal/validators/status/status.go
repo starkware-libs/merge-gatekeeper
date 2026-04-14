@@ -84,43 +84,27 @@ Ignored job count:     %d
 }
 
 func (s *status) IsSuccess() bool {
-	// TDOO: Add test case
 	return s.succeeded
 }
 
 func (s *status) getIncompleteJobs() []string {
+	done := make(map[string]struct{}, len(s.completeJobs)+len(s.errJobs)+len(s.cancelledJobs)+len(s.ignoredJobs))
+	for _, j := range s.completeJobs {
+		done[j] = struct{}{}
+	}
+	for _, j := range s.errJobs {
+		done[j] = struct{}{}
+	}
+	for _, j := range s.cancelledJobs {
+		done[j] = struct{}{}
+	}
+	for _, j := range s.ignoredJobs {
+		done[j] = struct{}{}
+	}
+
 	var incomplete []string
-
 	for _, job := range s.totalJobs {
-		found := false
-		for _, complete := range s.completeJobs {
-			if job == complete {
-				found = true
-				break
-			}
-		}
-
-		for _, failed := range s.errJobs {
-			if job == failed {
-				found = true
-				break
-			}
-		}
-
-		for _, cancelled := range s.cancelledJobs {
-			if job == cancelled {
-				found = true
-				break
-			}
-		}
-
-		for _, ignored := range s.ignoredJobs {
-			if job == ignored {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if _, ok := done[job]; !ok {
 			incomplete = append(incomplete, job)
 		}
 	}

@@ -796,10 +796,10 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
 					max := min(opts.Page*opts.PerPage, len(statuses))
 					sts := statuses[(opts.Page-1)*opts.PerPage : max]
-					l := len(sts)
+					total := len(statuses)
 					return &github.CombinedStatus{
 						Statuses:   sts,
-						TotalCount: &l,
+						TotalCount: &total,
 					}, nil, nil
 				},
 				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
@@ -850,10 +850,10 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
 					max := min(opts.Page*opts.PerPage, len(statuses))
 					sts := statuses[(opts.Page-1)*opts.PerPage : max]
-					l := len(sts)
+					total := len(statuses)
 					return &github.CombinedStatus{
 						Statuses:   sts,
-						TotalCount: &l,
+						TotalCount: &total,
 					}, nil, nil
 				},
 				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
@@ -904,10 +904,10 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
 					max := min(opts.Page*opts.PerPage, len(statuses))
 					sts := statuses[(opts.Page-1)*opts.PerPage : max]
-					l := len(sts)
+					total := len(statuses)
 					return &github.CombinedStatus{
 						Statuses:   sts,
-						TotalCount: &l,
+						TotalCount: &total,
 					}, nil, nil
 				},
 				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
