@@ -25,13 +25,6 @@ func intPtr(i int) *int {
 	return &i
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func TestCreateValidator(t *testing.T) {
 	tests := map[string]struct {
 		c       github.Client
