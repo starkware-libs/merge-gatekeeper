@@ -12,12 +12,14 @@ import (
 	"github.com/starkware-libs/merge-gatekeeper/internal/validators"
 )
 
+type jobState string
+
 const (
-	successState   = "success"
-	errorState     = "error"
-	failureState   = "failure"
-	pendingState   = "pending"
-	cancelledState = "cancelled"
+	successState   jobState = "success"
+	errorState     jobState = "error"
+	failureState   jobState = "failure"
+	pendingState   jobState = "pending"
+	cancelledState jobState = "cancelled"
 )
 
 // NOTE: https://docs.github.com/en/rest/reference/checks
@@ -43,7 +45,7 @@ var (
 
 type ghaStatus struct {
 	Job   string
-	State string
+	State jobState
 }
 
 type statusValidator struct {
@@ -108,7 +110,7 @@ func (sv *statusValidator) Validate(ctx context.Context) (validators.Status, err
 	st := &status{
 		totalJobs:      make([]string, 0, len(ghaStatuses)),
 		completeJobs:   make([]string, 0, len(ghaStatuses)),
-		errJobs:        make([]string, 0, len(ghaStatuses)/2),
+		failedJobs:        make([]string, 0, len(ghaStatuses)/2),
 		cancelledJobs:  make([]string, 0),
 		ignoredJobs:    make([]string, 0, len(ghaStatuses)),
 		succeeded:      true,
@@ -139,12 +141,12 @@ func (sv *statusValidator) Validate(ctx context.Context) (validators.Status, err
 			st.completeJobs = append(st.completeJobs, ghaStatus.Job)
 			successCnt++
 		case errorState, failureState:
-			st.errJobs = append(st.errJobs, ghaStatus.Job)
+			st.failedJobs = append(st.failedJobs, ghaStatus.Job)
 		case cancelledState:
 			st.cancelledJobs = append(st.cancelledJobs, ghaStatus.Job)
 		}
 	}
-	if len(st.errJobs) != 0 || len(st.cancelledJobs) != 0 {
+	if len(st.failedJobs) != 0 || len(st.cancelledJobs) != 0 {
 		return nil, errors.New(st.Detail())
 	}
 
@@ -375,7 +377,7 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 
 		ghaStatuses = append(ghaStatuses, &ghaStatus{
 			Job:   *s.Context,
-			State: *s.State,
+			State: jobState(*s.State),
 		})
 		sv.debugf("merge-gatekeeper [debug] job=%s state=%s source=combined_status\n", *s.Context, *s.State)
 	}

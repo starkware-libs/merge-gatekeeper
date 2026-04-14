@@ -5,7 +5,7 @@ import "fmt"
 type status struct {
 	totalJobs     []string
 	completeJobs  []string
-	errJobs       []string
+	failedJobs       []string
 	cancelledJobs []string
 	ignoredJobs   []string
 	succeeded     bool
@@ -41,7 +41,7 @@ Ignored job count:     %d
 		len(s.totalJobs),
 		len(s.completeJobs),
 		len(s.getIncompleteJobs()),
-		len(s.errJobs),
+		len(s.failedJobs),
 		len(s.cancelledJobs),
 		len(s.ignoredJobs),
 	)
@@ -72,7 +72,7 @@ Ignored job count:     %d
 ::endgroup::
 `,
 		result,
-		prettyPrintJobList(s.errJobs),
+		prettyPrintJobList(s.failedJobs),
 		prettyPrintJobList(s.completeJobs),
 		prettyPrintJobList(s.getIncompleteJobs()),
 		prettyPrintJobList(s.cancelledJobs),
@@ -88,11 +88,11 @@ func (s *status) IsSuccess() bool {
 }
 
 func (s *status) getIncompleteJobs() []string {
-	done := make(map[string]struct{}, len(s.completeJobs)+len(s.errJobs)+len(s.cancelledJobs)+len(s.ignoredJobs))
+	done := make(map[string]struct{}, len(s.completeJobs)+len(s.failedJobs)+len(s.cancelledJobs)+len(s.ignoredJobs))
 	for _, j := range s.completeJobs {
 		done[j] = struct{}{}
 	}
-	for _, j := range s.errJobs {
+	for _, j := range s.failedJobs {
 		done[j] = struct{}{}
 	}
 	for _, j := range s.cancelledJobs {

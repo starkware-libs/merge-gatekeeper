@@ -189,7 +189,7 @@ func Test_statusValidator_Validate(t *testing.T) {
 				succeeded:     true,
 				totalJobs:     []string{},
 				completeJobs:  []string{},
-				errJobs:       []string{},
+				failedJobs:       []string{},
 				cancelledJobs: []string{},
 				ignoredJobs:   []string{},
 			},
@@ -202,7 +202,7 @@ func Test_statusValidator_Validate(t *testing.T) {
 						Statuses: []*github.RepoStatus{
 							{
 								Context: stringPtr("self-job"),
-								State:   stringPtr(pendingState), // should be irrelevant
+								State:   stringPtr(string(pendingState)), // should be irrelevant
 							},
 						},
 					}, nil, nil
@@ -216,7 +216,7 @@ func Test_statusValidator_Validate(t *testing.T) {
 				succeeded:     true,
 				totalJobs:     []string{},
 				completeJobs:  []string{},
-				errJobs:       []string{},
+				failedJobs:       []string{},
 				cancelledJobs: []string{},
 				ignoredJobs:   []string{},
 			},
@@ -228,7 +228,7 @@ func Test_statusValidator_Validate(t *testing.T) {
 						Statuses: []*github.RepoStatus{
 							{
 								Context: stringPtr("job"),
-								State:   stringPtr(pendingState),
+								State:   stringPtr(string(pendingState)),
 							},
 						},
 					}, nil, nil
@@ -242,7 +242,7 @@ func Test_statusValidator_Validate(t *testing.T) {
 				succeeded:     false,
 				totalJobs:     []string{"job"},
 				completeJobs:  []string{},
-				errJobs:       []string{},
+				failedJobs:       []string{},
 				cancelledJobs: []string{},
 				ignoredJobs:   []string{},
 			},
@@ -255,15 +255,15 @@ func Test_statusValidator_Validate(t *testing.T) {
 						Statuses: []*github.RepoStatus{
 							{
 								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
+								State:   stringPtr(string(successState)),
 							},
 							{
 								Context: stringPtr("job-02"),
-								State:   stringPtr(errorState),
+								State:   stringPtr(string(errorState)),
 							},
 							{
 								Context: stringPtr("self-job"),
-								State:   stringPtr(pendingState),
+								State:   stringPtr(string(pendingState)),
 							},
 						},
 					}, nil, nil
@@ -280,7 +280,7 @@ func Test_statusValidator_Validate(t *testing.T) {
 				completeJobs: []string{
 					"job-01",
 				},
-				errJobs: []string{
+				failedJobs: []string{
 					"job-02",
 				},
 				cancelledJobs: []string{},
@@ -295,15 +295,15 @@ func Test_statusValidator_Validate(t *testing.T) {
 						Statuses: []*github.RepoStatus{
 							{
 								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
+								State:   stringPtr(string(successState)),
 							},
 							{
 								Context: stringPtr("job-02"),
-								State:   stringPtr(failureState),
+								State:   stringPtr(string(failureState)),
 							},
 							{
 								Context: stringPtr("self-job"),
-								State:   stringPtr(pendingState),
+								State:   stringPtr(string(pendingState)),
 							},
 						},
 					}, nil, nil
@@ -320,7 +320,7 @@ func Test_statusValidator_Validate(t *testing.T) {
 				completeJobs: []string{
 					"job-01",
 				},
-				errJobs: []string{
+				failedJobs: []string{
 					"job-02",
 				},
 				cancelledJobs: []string{},
@@ -335,15 +335,15 @@ func Test_statusValidator_Validate(t *testing.T) {
 						Statuses: []*github.RepoStatus{
 							{
 								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
+								State:   stringPtr(string(successState)),
 							},
 							{
 								Context: stringPtr("job-02"),
-								State:   stringPtr(pendingState),
+								State:   stringPtr(string(pendingState)),
 							},
 							{
 								Context: stringPtr("self-job"),
-								State:   stringPtr(pendingState),
+								State:   stringPtr(string(pendingState)),
 							},
 						},
 					}, nil, nil
@@ -362,7 +362,7 @@ func Test_statusValidator_Validate(t *testing.T) {
 				completeJobs: []string{
 					"job-01",
 				},
-				errJobs:       []string{},
+				failedJobs:       []string{},
 				cancelledJobs: []string{},
 				ignoredJobs:   []string{},
 			},
@@ -375,15 +375,15 @@ func Test_statusValidator_Validate(t *testing.T) {
 						Statuses: []*github.RepoStatus{
 							{
 								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
+								State:   stringPtr(string(successState)),
 							},
 							{
 								Context: stringPtr("job-02"),
-								State:   stringPtr(successState),
+								State:   stringPtr(string(successState)),
 							},
 							{
 								Context: stringPtr("self-job"),
-								State:   stringPtr(pendingState),
+								State:   stringPtr(string(pendingState)),
 							},
 						},
 					}, nil, nil
@@ -403,7 +403,7 @@ func Test_statusValidator_Validate(t *testing.T) {
 					"job-01",
 					"job-02",
 				},
-				errJobs:       []string{},
+				failedJobs:       []string{},
 				cancelledJobs: []string{},
 				ignoredJobs:   []string{},
 			},
@@ -417,15 +417,15 @@ func Test_statusValidator_Validate(t *testing.T) {
 						Statuses: []*github.RepoStatus{
 							{
 								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
+								State:   stringPtr(string(successState)),
 							},
 							{
 								Context: stringPtr("job-02"),
-								State:   stringPtr(errorState),
+								State:   stringPtr(string(errorState)),
 							},
 							{
 								Context: stringPtr("self-job"),
-								State:   stringPtr(pendingState),
+								State:   stringPtr(string(pendingState)),
 							},
 						},
 					}, nil, nil
@@ -439,7 +439,7 @@ func Test_statusValidator_Validate(t *testing.T) {
 				succeeded:     true,
 				totalJobs:     []string{"job-01"},
 				completeJobs:  []string{"job-01"},
-				errJobs:       []string{},
+				failedJobs:       []string{},
 				cancelledJobs: []string{},
 				ignoredJobs:   []string{"job-02", "job-03"},
 			},
@@ -453,15 +453,15 @@ func Test_statusValidator_Validate(t *testing.T) {
 						Statuses: []*github.RepoStatus{
 							{
 								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
+								State:   stringPtr(string(successState)),
 							},
 							{
 								Context: stringPtr("job-02"),
-								State:   stringPtr(failureState),
+								State:   stringPtr(string(failureState)),
 							},
 							{
 								Context: stringPtr("self-job"),
-								State:   stringPtr(pendingState),
+								State:   stringPtr(string(pendingState)),
 							},
 						},
 					}, nil, nil
@@ -475,10 +475,45 @@ func Test_statusValidator_Validate(t *testing.T) {
 				succeeded:     true,
 				totalJobs:     []string{"job-01"},
 				completeJobs:  []string{"job-01"},
-				errJobs:       []string{},
+				failedJobs:       []string{},
 				cancelledJobs: []string{},
 				ignoredJobs:   []string{"job-02", "job-03"},
 			},
+		},
+		"returns error when a check run is cancelled": {
+			selfJobName: "self-job",
+			client: &mock.Client{
+				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
+					return &github.CombinedStatus{}, nil, nil
+				},
+				ListCheckRunsForRefFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error) {
+					return &github.ListCheckRunsResults{
+						CheckRuns: []*github.CheckRun{
+							{
+								ID:         int64Ptr(1),
+								Name:       stringPtr("build"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunSuccessConclusion),
+							},
+							{
+								ID:         int64Ptr(2),
+								Name:       stringPtr("test"),
+								Status:     stringPtr(checkRunCompletedStatus),
+								Conclusion: stringPtr(checkRunCancelledConclusion),
+							},
+						},
+					}, nil, nil
+				},
+			},
+			wantErr: true,
+			wantErrStr: (&status{
+				totalJobs:     []string{"build", "test"},
+				completeJobs:  []string{"build"},
+				failedJobs:    []string{},
+				cancelledJobs: []string{"test"},
+				ignoredJobs:   []string{},
+			}).Detail(),
+			wantStatus: nil,
 		},
 	}
 	for name, tt := range tests {
@@ -528,11 +563,11 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 							// The first element here is the latest state.
 							{
 								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
+								State:   stringPtr(string(successState)),
 							},
 							{
 								Context: stringPtr("job-01"), // Same as above job name, and thus should be disregarded as old job status.
-								State:   stringPtr(errorState),
+								State:   stringPtr(string(errorState)),
 							},
 						},
 					}, nil, nil
@@ -699,7 +734,7 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 						Statuses: []*github.RepoStatus{
 							{
 								Context: stringPtr("job-01"),
-								State:   stringPtr(successState),
+								State:   stringPtr(string(successState)),
 							},
 						},
 					}, nil, nil
@@ -776,7 +811,7 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 			for i := 0; i < num_statuses; i++ {
 				statuses[i] = &github.RepoStatus{
 					Context: stringPtr(fmt.Sprintf("job-%d", i)),
-					State:   stringPtr(successState),
+					State:   stringPtr(string(successState)),
 				}
 
 				checkRuns[i] = &github.CheckRun{
@@ -830,7 +865,7 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 			for i := 0; i < num_statuses; i++ {
 				statuses[i] = &github.RepoStatus{
 					Context: stringPtr(fmt.Sprintf("job-%d", i)),
-					State:   stringPtr(successState),
+					State:   stringPtr(string(successState)),
 				}
 
 				checkRuns[i] = &github.CheckRun{
@@ -884,7 +919,7 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 			for i := 0; i < num_statuses; i++ {
 				statuses[i] = &github.RepoStatus{
 					Context: stringPtr(fmt.Sprintf("job-%d", i)),
-					State:   stringPtr(successState),
+					State:   stringPtr(string(successState)),
 				}
 
 				checkRuns[i] = &github.CheckRun{

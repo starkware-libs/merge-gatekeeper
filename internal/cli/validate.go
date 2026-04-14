@@ -22,7 +22,7 @@ var (
 	ghRepo              string // e.g. owner/repo
 	ghRef               string
 	timeoutSecond       uint
-	validateInvalSecond uint
+	validateIntervalSeconds uint
 	selfJobName         string
 	ignoredJobs         string
 )
@@ -85,15 +85,15 @@ func validateCmd() *cobra.Command {
 	cmd.MarkPersistentFlagRequired("ref")
 
 	cmd.PersistentFlags().UintVar(&timeoutSecond, "timeout", 600, "set validate timeout second")
-	cmd.PersistentFlags().UintVar(&validateInvalSecond, "interval", 10, "set validate interval second")
+	cmd.PersistentFlags().UintVar(&validateIntervalSeconds, "interval", 10, "set validate interval second")
 
 	cmd.PersistentFlags().StringVarP(&ignoredJobs, "ignored", "i", "", "set ignored jobs (comma-separated list)")
 
 	return cmd
 }
 
-func ownerAndRepository(str string) (owner string, repo string) {
-	sp := strings.Split(str, "/")
+func ownerAndRepository(fullName string) (owner string, repo string) {
+	sp := strings.Split(fullName, "/")
 	switch len(sp) {
 	case 1:
 		return sp[0], ""
@@ -115,14 +115,14 @@ func doValidateCmd(ctx context.Context, logger logger, vs ...validators.Validato
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSecond)*time.Second)
 	defer cancel()
 
-	invalT := ticker.NewInstantTicker(time.Duration(validateInvalSecond) * time.Second)
-	defer invalT.Stop()
+	intervalTicker := ticker.NewInstantTicker(time.Duration(validateIntervalSeconds) * time.Second)
+	defer intervalTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-invalT.C():
+		case <-intervalTicker.C():
 			var successCnt int
 			for _, v := range vs {
 				ok, err := validate(ctx, v, logger)
@@ -136,7 +136,7 @@ func doValidateCmd(ctx context.Context, logger logger, vs ...validators.Validato
 			if successCnt != len(vs) {
 				logger.PrintErrln("")
 				logger.PrintErrln("  WARNING: Validation is yet to be completed. This is most likely due to some other jobs still running.")
-				logger.PrintErrf("           Waiting for %d seconds before retrying.\n\n", validateInvalSecond)
+				logger.PrintErrf("           Waiting for %d seconds before retrying.\n\n", validateIntervalSeconds)
 				break
 			}
 
