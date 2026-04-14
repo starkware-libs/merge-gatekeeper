@@ -12,6 +12,7 @@ jobs:
     permissions:
       checks: read
       statuses: read
+      actions: read
     steps:
       - name: Check out
         uses: actions/checkout@v6
