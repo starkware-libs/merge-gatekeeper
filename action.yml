@@ -3,6 +3,9 @@ description: "Get better merge control"
 branding:
   icon: git-merge
   color: orange
+  # Required permissions: checks: read, statuses: read, actions: read
+  # actions: read is needed to detect superseded workflow runs, which prevents
+  # false failures when concurrent runs cancel each other.
 inputs:
   token:
     description: "GitHub token (defaults to github.token when omitted; or set GITHUB_TOKEN env)"

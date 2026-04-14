@@ -82,6 +82,50 @@ func TestWithRetry_NoRetryOn4xx(t *testing.T) {
 	_ = resp
 }
 
+func TestWithRetry_RetryOnRateLimit(t *testing.T) {
+	ctx := context.Background()
+	calls := 0
+	v, resp, err := withRetry(ctx, 3, 1*time.Millisecond, func() (interface{}, *Response, error) {
+		calls++
+		if calls < 2 {
+			return nil, &Response{Response: &http.Response{
+				StatusCode: 403,
+				Header:     http.Header{"X-Ratelimit-Remaining": []string{"0"}},
+			}}, errors.New("rate limited")
+		}
+		return "ok", &Response{Response: &http.Response{StatusCode: 200}}, nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if v != "ok" {
+		t.Errorf("got v=%v", v)
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 calls, got %d", calls)
+	}
+	_ = resp
+}
+
+func TestWithRetry_NoRetryOn403NonRateLimit(t *testing.T) {
+	ctx := context.Background()
+	calls := 0
+	_, resp, err := withRetry(ctx, 3, time.Millisecond, func() (interface{}, *Response, error) {
+		calls++
+		return nil, &Response{Response: &http.Response{
+			StatusCode: 403,
+			Header:     http.Header{},
+		}}, errors.New("forbidden")
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 1 {
+		t.Errorf("expected 1 call (no retry on non-rate-limit 403), got %d", calls)
+	}
+	_ = resp
+}
+
 func TestWithRetry_NoRetryOnContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

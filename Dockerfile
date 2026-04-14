@@ -1,4 +1,4 @@
-ARG GO_VERSION=1.24.0
+ARG GO_VERSION=1.25.9
 
 FROM public.ecr.aws/docker/library/golang:${GO_VERSION}-alpine
 

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/go-github/v38/github"
+	"github.com/google/go-github/v84/github"
 	"golang.org/x/oauth2"
 )
 
@@ -29,9 +29,16 @@ type (
 	ListCheckRunsResults = github.ListCheckRunsResults
 )
 
+type (
+	WorkflowRun              = github.WorkflowRun
+	WorkflowRuns             = github.WorkflowRuns
+	ListWorkflowRunsOptions  = github.ListWorkflowRunsOptions
+)
+
 type Client interface {
 	GetCombinedStatus(ctx context.Context, owner, repo, ref string, opts *ListOptions) (*CombinedStatus, *Response, error)
 	ListCheckRunsForRef(ctx context.Context, owner, repo, ref string, opts *ListCheckRunsOptions) (*ListCheckRunsResults, *Response, error)
+	ListRepositoryWorkflowRuns(ctx context.Context, owner, repo string, opts *ListWorkflowRunsOptions) (*WorkflowRuns, *Response, error)
 }
 
 type client struct {
@@ -49,28 +56,27 @@ func NewClient(ctx context.Context, token string) Client {
 }
 
 func (c *client) GetCombinedStatus(ctx context.Context, owner, repo, ref string, opts *ListOptions) (*CombinedStatus, *Response, error) {
-	v, resp, err := withRetry(ctx, defaultMaxRetries, defaultRetryDelay, func() (interface{}, *Response, error) {
+	return withRetry(ctx, defaultMaxRetries, defaultRetryDelay, func() (*CombinedStatus, *Response, error) {
 		return c.ghc.Repositories.GetCombinedStatus(ctx, owner, repo, ref, opts)
 	})
-	if err != nil {
-		return nil, resp, err
-	}
-	return v.(*CombinedStatus), resp, nil
 }
 
 func (c *client) ListCheckRunsForRef(ctx context.Context, owner, repo, ref string, opts *ListCheckRunsOptions) (*ListCheckRunsResults, *Response, error) {
-	v, resp, err := withRetry(ctx, defaultMaxRetries, defaultRetryDelay, func() (interface{}, *Response, error) {
+	return withRetry(ctx, defaultMaxRetries, defaultRetryDelay, func() (*ListCheckRunsResults, *Response, error) {
 		return c.ghc.Checks.ListCheckRunsForRef(ctx, owner, repo, ref, opts)
 	})
-	if err != nil {
-		return nil, resp, err
-	}
-	return v.(*ListCheckRunsResults), resp, nil
+}
+
+func (c *client) ListRepositoryWorkflowRuns(ctx context.Context, owner, repo string, opts *ListWorkflowRunsOptions) (*WorkflowRuns, *Response, error) {
+	return withRetry(ctx, defaultMaxRetries, defaultRetryDelay, func() (*WorkflowRuns, *Response, error) {
+		return c.ghc.Actions.ListRepositoryWorkflowRuns(ctx, owner, repo, opts)
+	})
 }
 
 // withRetry runs fn and retries on 5xx with exponential backoff. It does not retry on context
 // cancellation or 4xx errors.
-func withRetry(ctx context.Context, maxRetries int, initialDelay time.Duration, fn func() (interface{}, *Response, error)) (interface{}, *Response, error) {
+func withRetry[T any](ctx context.Context, maxRetries int, initialDelay time.Duration, fn func() (T, *Response, error)) (T, *Response, error) {
+	var zero T
 	var lastResp *Response
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -82,13 +88,18 @@ func withRetry(ctx context.Context, maxRetries int, initialDelay time.Duration, 
 		lastErr = err
 
 		if ctx.Err() != nil {
-			return nil, lastResp, fmt.Errorf("context error while retrying: %w", ctx.Err())
+			return zero, lastResp, fmt.Errorf("context error while retrying: %w", ctx.Err())
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, lastResp, err
+			return zero, lastResp, err
 		}
-		if resp == nil || resp.StatusCode < 500 || resp.StatusCode > 599 {
-			return nil, lastResp, err
+		if resp == nil {
+			return zero, lastResp, err
+		}
+		// Retry on 5xx and 403 rate-limit responses.
+		isRateLimit := resp.StatusCode == 403 && resp.Header.Get("X-RateLimit-Remaining") == "0"
+		if !isRateLimit && (resp.StatusCode < 500 || resp.StatusCode > 599) {
+			return zero, lastResp, err
 		}
 		if attempt == maxRetries-1 {
 			break
@@ -96,10 +107,10 @@ func withRetry(ctx context.Context, maxRetries int, initialDelay time.Duration, 
 		backoff := initialDelay * time.Duration(1<<uint(attempt))
 		select {
 		case <-ctx.Done():
-			return nil, lastResp, ctx.Err()
+			return zero, lastResp, ctx.Err()
 		case <-time.After(backoff):
 			// retry
 		}
 	}
-	return nil, lastResp, lastErr
+	return zero, lastResp, lastErr
 }

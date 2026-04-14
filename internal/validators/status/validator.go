@@ -12,12 +12,14 @@ import (
 	"github.com/starkware-libs/merge-gatekeeper/internal/validators"
 )
 
+type jobState string
+
 const (
-	successState   = "success"
-	errorState     = "error"
-	failureState   = "failure"
-	pendingState   = "pending"
-	cancelledState = "cancelled"
+	successState   jobState = "success"
+	errorState     jobState = "error"
+	failureState   jobState = "failure"
+	pendingState   jobState = "pending"
+	cancelledState jobState = "cancelled"
 )
 
 // NOTE: https://docs.github.com/en/rest/reference/checks
@@ -43,7 +45,7 @@ var (
 
 type ghaStatus struct {
 	Job   string
-	State string
+	State jobState
 }
 
 type statusValidator struct {
@@ -108,7 +110,7 @@ func (sv *statusValidator) Validate(ctx context.Context) (validators.Status, err
 	st := &status{
 		totalJobs:      make([]string, 0, len(ghaStatuses)),
 		completeJobs:   make([]string, 0, len(ghaStatuses)),
-		errJobs:        make([]string, 0, len(ghaStatuses)/2),
+		failedJobs:        make([]string, 0, len(ghaStatuses)/2),
 		cancelledJobs:  make([]string, 0),
 		ignoredJobs:    make([]string, 0, len(ghaStatuses)),
 		succeeded:      true,
@@ -139,12 +141,12 @@ func (sv *statusValidator) Validate(ctx context.Context) (validators.Status, err
 			st.completeJobs = append(st.completeJobs, ghaStatus.Job)
 			successCnt++
 		case errorState, failureState:
-			st.errJobs = append(st.errJobs, ghaStatus.Job)
+			st.failedJobs = append(st.failedJobs, ghaStatus.Job)
 		case cancelledState:
 			st.cancelledJobs = append(st.cancelledJobs, ghaStatus.Job)
 		}
 	}
-	if len(st.errJobs) != 0 {
+	if len(st.failedJobs) != 0 || len(st.cancelledJobs) != 0 {
 		return nil, errors.New(st.Detail())
 	}
 
@@ -165,7 +167,7 @@ func (sv *statusValidator) getCombinedStatus(ctx context.Context) ([]*github.Rep
 			return nil, err
 		}
 		combined = append(combined, c.Statuses...)
-		if c.GetTotalCount() < maxStatusesPerPage {
+		if c.GetTotalCount() <= len(combined) {
 			break
 		}
 		page++
@@ -197,6 +199,170 @@ func (sv *statusValidator) listCheckRunsForRef(ctx context.Context) ([]*github.C
 	return runResults, nil
 }
 
+const maxWorkflowRunsPerPage = 100
+
+func (sv *statusValidator) listWorkflowRunsForRef(ctx context.Context) ([]*github.WorkflowRun, error) {
+	var runs []*github.WorkflowRun
+	page := 1
+	for {
+		wr, _, err := sv.client.ListRepositoryWorkflowRuns(ctx, sv.owner, sv.repo, &github.ListWorkflowRunsOptions{
+			HeadSHA:     sv.ref,
+			ListOptions: github.ListOptions{Page: page, PerPage: maxWorkflowRunsPerPage},
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(wr.WorkflowRuns) == 0 {
+			break
+		}
+		runs = append(runs, wr.WorkflowRuns...)
+		if wr.GetTotalCount() <= len(runs) {
+			break
+		}
+		page++
+	}
+	return runs, nil
+}
+
+// filterSupersededRuns removes or converts stale check runs from superseded workflow suites.
+// A suite is superseded when a newer non-cancelled run of the same workflow exists for this commit.
+// Check runs from superseded suites are handled as follows:
+//   - conclusion is success/neutral/skipped → keep (valid result, needed for "re-run failed jobs")
+//   - superseding run status != "completed" → convert to pending (replacement still in progress)
+//   - superseding run status == "completed" → drop (replacement finished, job not needed)
+func (sv *statusValidator) filterSupersededRuns(ctx context.Context, runResults []*github.CheckRun) ([]*github.CheckRun, error) {
+	// Count distinct non-zero suite IDs. If <=1, nothing can be superseded.
+	distinctSuiteIDs := make(map[int64]struct{})
+	for _, run := range runResults {
+		if run.CheckSuite != nil && run.CheckSuite.ID != nil && *run.CheckSuite.ID != 0 {
+			distinctSuiteIDs[*run.CheckSuite.ID] = struct{}{}
+		}
+	}
+	if len(distinctSuiteIDs) <= 1 {
+		return runResults, nil
+	}
+
+	// Fetch workflow runs for this commit. Requires actions: read permission.
+	workflowRuns, err := sv.listWorkflowRunsForRef(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch workflow runs (actions: read permission required): %w", err)
+	}
+	if len(workflowRuns) == 0 {
+		return runResults, nil
+	}
+
+	// For each workflow, find the latest non-cancelled run by (RunNumber, RunAttempt).
+	type workflowLatest struct {
+		runNumber  int
+		runAttempt int
+		suiteID    int64
+		status     string
+	}
+	perWorkflow := make(map[int64]*workflowLatest) // keyed by WorkflowID
+	for _, wr := range workflowRuns {
+		if wr.WorkflowID == nil || wr.CheckSuiteID == nil {
+			continue
+		}
+		// Skip cancelled runs — they can't supersede anything.
+		if wr.Conclusion != nil && *wr.Conclusion == "cancelled" {
+			continue
+		}
+		rn := 0
+		if wr.RunNumber != nil {
+			rn = *wr.RunNumber
+		}
+		ra := 0
+		if wr.RunAttempt != nil {
+			ra = *wr.RunAttempt
+		}
+		st := ""
+		if wr.Status != nil {
+			st = *wr.Status
+		}
+		wid := *wr.WorkflowID
+		existing, ok := perWorkflow[wid]
+		if !ok || rn > existing.runNumber || (rn == existing.runNumber && ra > existing.runAttempt) {
+			perWorkflow[wid] = &workflowLatest{
+				runNumber:  rn,
+				runAttempt: ra,
+				suiteID:    *wr.CheckSuiteID,
+				status:     st,
+			}
+		}
+	}
+
+	// Build supersededSuites: map from CheckSuiteID → superseding run's Status.
+	// A suite is superseded if it belongs to a workflow that has a newer non-cancelled run.
+	supersededSuites := make(map[int64]string) // suiteID → superseding run status
+	for _, wr := range workflowRuns {
+		if wr.WorkflowID == nil || wr.CheckSuiteID == nil {
+			continue
+		}
+		latest, ok := perWorkflow[*wr.WorkflowID]
+		if !ok {
+			// All runs of this workflow are cancelled — nothing superseded.
+			continue
+		}
+		if *wr.CheckSuiteID != latest.suiteID {
+			supersededSuites[*wr.CheckSuiteID] = latest.status
+		}
+	}
+
+	if len(supersededSuites) == 0 {
+		return runResults, nil
+	}
+
+	sv.debugf("merge-gatekeeper [debug] superseded suites detected: %d suite(s) from %d workflow run(s)\n",
+		len(supersededSuites), len(workflowRuns))
+
+	// Filter check runs from superseded suites.
+	filtered := make([]*github.CheckRun, 0, len(runResults))
+	for _, run := range runResults {
+		suiteID := int64(0)
+		if run.CheckSuite != nil && run.CheckSuite.ID != nil {
+			suiteID = *run.CheckSuite.ID
+		}
+		supersedingStatus, isSuperseded := supersededSuites[suiteID]
+		if !isSuperseded {
+			filtered = append(filtered, run)
+			continue
+		}
+
+		name := ""
+		if run.Name != nil {
+			name = *run.Name
+		}
+
+		// Keep successful/neutral/skipped checks from superseded suites (valid results).
+		if run.Status != nil && *run.Status == checkRunCompletedStatus && run.Conclusion != nil {
+			switch *run.Conclusion {
+			case checkRunSuccessConclusion, checkRunNeutralConclusion, checkRunSkipConclusion:
+				sv.debugf("merge-gatekeeper [debug] job=%s: keeping %s check from superseded suite %d\n",
+					name, *run.Conclusion, suiteID)
+				filtered = append(filtered, run)
+				continue
+			}
+		}
+
+		if supersedingStatus != checkRunCompletedStatus {
+			// Superseding run is still in progress — convert to pending.
+			// Clone the check run to avoid mutating the original.
+			pendingStatus := "queued"
+			converted := *run
+			converted.Status = &pendingStatus
+			converted.Conclusion = nil
+			sv.debugf("merge-gatekeeper [debug] job=%s: converted to pending (superseded suite %d, superseding run %s)\n",
+				name, suiteID, supersedingStatus)
+			filtered = append(filtered, &converted)
+		} else {
+			// Superseding run completed — drop the stale check.
+			sv.debugf("merge-gatekeeper [debug] job=%s: dropped from superseded suite %d (superseding run completed)\n",
+				name, suiteID)
+		}
+	}
+	return filtered, nil
+}
+
 func (sv *statusValidator) debugf(format string, args ...interface{}) {
 	if sv.debugLog != nil {
 		sv.debugLog(format, args...)
@@ -216,6 +382,12 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 
 	sv.debugf("merge-gatekeeper [debug] ref=%s owner=%s repo=%s combined_status_count=%d check_runs_count=%d\n",
 		sv.ref, sv.owner, sv.repo, len(combined), len(runResults))
+
+	// Pre-filter: remove/convert stale check runs from superseded workflow suites.
+	runResults, err = sv.filterSupersededRuns(ctx, runResults)
+	if err != nil {
+		return nil, err
+	}
 
 	// Because multiple jobs with the same name may exist when jobs are created dynamically by third-party tools, etc.,
 	// only the latest job should be managed.
@@ -361,6 +533,8 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	}
 
 	// Then add combined status only for contexts that don't have a check run (so we don't overwrite with stale state).
+	// The combined status API already returns only the latest status per context, so currentJobs
+	// just prevents a combined status from overriding a check run for the same context name.
 	for _, s := range combined {
 		if s.Context == nil || s.State == nil {
 			return nil, fmt.Errorf("%w context: %v, status: %v", ErrInvalidCombinedStatusResponse, s.Context, s.State)
@@ -373,7 +547,7 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 
 		ghaStatuses = append(ghaStatuses, &ghaStatus{
 			Job:   *s.Context,
-			State: *s.State,
+			State: jobState(*s.State),
 		})
 		sv.debugf("merge-gatekeeper [debug] job=%s state=%s source=combined_status\n", *s.Context, *s.State)
 	}

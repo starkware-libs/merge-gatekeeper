@@ -13,7 +13,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	validateInvalSecond = 1
+	validateIntervalSeconds = 1
 	timeoutSecond = 2
 	os.Exit(m.Run())
 }

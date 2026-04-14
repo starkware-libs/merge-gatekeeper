@@ -12,7 +12,10 @@ func (es Errors) Error() string {
 	case 0:
 		return ""
 	case 1:
-		return fmt.Sprintf("%v", es[0])
+		if es[0] != nil {
+			return es[0].Error()
+		}
+		return ""
 	}
 
 	rt := "composite error:"
