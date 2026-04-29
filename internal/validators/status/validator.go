@@ -56,6 +56,11 @@ type statusValidator struct {
 	ignoredJobs []string
 	client      github.Client
 	debugLog    DebugLog
+
+	// duplicateCheckCached is set after detectDuplicateNamedJobs has run
+	// successfully for this ref. The result is invariant per SHA, so we run
+	// the check at most once per validator instance instead of every poll.
+	duplicateCheckCached bool
 }
 
 func CreateValidator(c github.Client, opts ...Option) (validators.Validator, error) {
@@ -102,6 +107,18 @@ func (sv *statusValidator) validateFields() error {
 }
 
 func (sv *statusValidator) Validate(ctx context.Context) (validators.Status, error) {
+	// One-time precondition: fail loud if any workflow has two YAML jobs that
+	// share a display name. Same-suite same-name check runs are indistinguishable
+	// from re-runs of one job via the API, so the dedup logic in listGhaStatuses
+	// would silently drop one — masking CI signal. The YAML structure is fixed
+	// for this ref, so cache the result after the first successful run.
+	if !sv.duplicateCheckCached {
+		if err := sv.detectDuplicateNamedJobs(ctx); err != nil {
+			return nil, err
+		}
+		sv.duplicateCheckCached = true
+	}
+
 	ghaStatuses, err := sv.listGhaStatuses(ctx)
 	if err != nil {
 		return nil, err
@@ -222,6 +239,119 @@ func (sv *statusValidator) listWorkflowRunsForRef(ctx context.Context) ([]*githu
 		page++
 	}
 	return runs, nil
+}
+
+const maxWorkflowJobsPerPage = 100
+
+// listAllWorkflowJobs paginates through all jobs of a workflow run.
+// filter="latest" returns one entry per YAML job from the latest attempt,
+// which is what duplicate-name detection wants — same-named entries in this
+// list mean the YAML literally defines two jobs with that display name.
+func (sv *statusValidator) listAllWorkflowJobs(ctx context.Context, runID int64, filter string) ([]*github.WorkflowJob, error) {
+	var jobs []*github.WorkflowJob
+	page := 1
+	for {
+		result, _, err := sv.client.ListWorkflowJobs(ctx, sv.owner, sv.repo, runID, &github.ListWorkflowJobsOptions{
+			Filter: filter,
+			ListOptions: github.ListOptions{
+				Page:    page,
+				PerPage: maxWorkflowJobsPerPage,
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		if result == nil || len(result.Jobs) == 0 {
+			break
+		}
+		jobs = append(jobs, result.Jobs...)
+		if result.GetTotalCount() <= len(jobs) {
+			break
+		}
+		page++
+	}
+	return jobs, nil
+}
+
+// detectDuplicateNamedJobs fails the gatekeeper loudly when any workflow on
+// this ref defines two YAML jobs that share a display name. Same-suite
+// same-name check runs are ambiguous via the GitHub API — they could be
+// re-runs of one job or two distinct YAML jobs. Rather than silently picking
+// one (which would drop CI signal), we use the workflow_jobs API at
+// filter=latest to count names within a single workflow run; same-named
+// entries there mean the YAML really has duplicates.
+//
+// The result is invariant for a given SHA, so the caller caches success. If
+// any API call fails, we propagate the error and rely on the caller to retry
+// on the next poll.
+func (sv *statusValidator) detectDuplicateNamedJobs(ctx context.Context) error {
+	workflowRuns, err := sv.listWorkflowRunsForRef(ctx)
+	if err != nil {
+		return fmt.Errorf("duplicate-named-jobs check: failed to fetch workflow runs: %w", err)
+	}
+	if len(workflowRuns) == 0 {
+		return nil
+	}
+
+	// Pick one run per workflow_id. Any run for this SHA shares the same YAML,
+	// so we just take the highest run_number to get the most recent metadata.
+	type pickedRun struct {
+		runID        int64
+		workflowName string
+		runNumber    int
+	}
+	perWorkflow := make(map[int64]pickedRun)
+	for _, wr := range workflowRuns {
+		if wr.WorkflowID == nil || wr.ID == nil {
+			continue
+		}
+		wid := *wr.WorkflowID
+		runNumber := 0
+		if wr.RunNumber != nil {
+			runNumber = *wr.RunNumber
+		}
+		if existing, ok := perWorkflow[wid]; ok && runNumber <= existing.runNumber {
+			continue
+		}
+		workflowName := ""
+		if wr.Name != nil {
+			workflowName = *wr.Name
+		}
+		perWorkflow[wid] = pickedRun{
+			runID:        *wr.ID,
+			workflowName: workflowName,
+			runNumber:    runNumber,
+		}
+	}
+
+	for _, pr := range perWorkflow {
+		jobs, err := sv.listAllWorkflowJobs(ctx, pr.runID, "latest")
+		if err != nil {
+			return fmt.Errorf(
+				"duplicate-named-jobs check: failed to list jobs for workflow %q (run %d): %w",
+				pr.workflowName, pr.runID, err)
+		}
+		nameCount := make(map[string]int)
+		for _, job := range jobs {
+			if job.Name == nil {
+				continue
+			}
+			nameCount[*job.Name]++
+		}
+		for name, count := range nameCount {
+			if count > 1 {
+				return fmt.Errorf(
+					"workflow %q defines %d jobs with the display name %q in a single run; "+
+						"the gatekeeper cannot reliably distinguish same-workflow same-name jobs "+
+						"from re-runs of one job. Rename the duplicates in the workflow YAML so "+
+						"each job has a unique name.",
+					pr.workflowName, count, name)
+			}
+		}
+		sv.debugf("merge-gatekeeper [debug] duplicate-named-jobs check passed for workflow %q (%d jobs)\n",
+			pr.workflowName, len(jobs))
+	}
+	return nil
 }
 
 // suiteWorkflowInfo identifies the workflow that owns a given check suite.
