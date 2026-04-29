@@ -33,12 +33,16 @@ type (
 	WorkflowRun              = github.WorkflowRun
 	WorkflowRuns             = github.WorkflowRuns
 	ListWorkflowRunsOptions  = github.ListWorkflowRunsOptions
+	WorkflowJob              = github.WorkflowJob
+	Jobs                     = github.Jobs
+	ListWorkflowJobsOptions  = github.ListWorkflowJobsOptions
 )
 
 type Client interface {
 	GetCombinedStatus(ctx context.Context, owner, repo, ref string, opts *ListOptions) (*CombinedStatus, *Response, error)
 	ListCheckRunsForRef(ctx context.Context, owner, repo, ref string, opts *ListCheckRunsOptions) (*ListCheckRunsResults, *Response, error)
 	ListRepositoryWorkflowRuns(ctx context.Context, owner, repo string, opts *ListWorkflowRunsOptions) (*WorkflowRuns, *Response, error)
+	ListWorkflowJobs(ctx context.Context, owner, repo string, runID int64, opts *ListWorkflowJobsOptions) (*Jobs, *Response, error)
 }
 
 type client struct {
@@ -70,6 +74,12 @@ func (c *client) ListCheckRunsForRef(ctx context.Context, owner, repo, ref strin
 func (c *client) ListRepositoryWorkflowRuns(ctx context.Context, owner, repo string, opts *ListWorkflowRunsOptions) (*WorkflowRuns, *Response, error) {
 	return withRetry(ctx, defaultMaxRetries, defaultRetryDelay, func() (*WorkflowRuns, *Response, error) {
 		return c.ghc.Actions.ListRepositoryWorkflowRuns(ctx, owner, repo, opts)
+	})
+}
+
+func (c *client) ListWorkflowJobs(ctx context.Context, owner, repo string, runID int64, opts *ListWorkflowJobsOptions) (*Jobs, *Response, error) {
+	return withRetry(ctx, defaultMaxRetries, defaultRetryDelay, func() (*Jobs, *Response, error) {
+		return c.ghc.Actions.ListWorkflowJobs(ctx, owner, repo, runID, opts)
 	})
 }
 
