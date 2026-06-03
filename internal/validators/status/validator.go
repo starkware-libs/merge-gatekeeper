@@ -183,6 +183,13 @@ func (sv *statusValidator) getCombinedStatus(ctx context.Context) ([]*github.Rep
 		if err != nil {
 			return nil, err
 		}
+		// Guard against an inconsistent listing (total_count above the number
+		// of items actually returned): an empty page ends pagination, as in
+		// listWorkflowRunsForRef — otherwise this loop would hammer the API
+		// until the gatekeeper's timeout.
+		if len(c.Statuses) == 0 {
+			break
+		}
 		combined = append(combined, c.Statuses...)
 		if c.GetTotalCount() <= len(combined) {
 			break
@@ -206,6 +213,11 @@ func (sv *statusValidator) listCheckRunsForRef(ctx context.Context) ([]*github.C
 		})
 		if err != nil {
 			return nil, err
+		}
+		// Empty page ends pagination — see the matching guard in
+		// getCombinedStatus and listWorkflowRunsForRef.
+		if len(cr.CheckRuns) == 0 {
+			break
 		}
 		runResults = append(runResults, cr.CheckRuns...)
 		if cr.GetTotal() <= len(runResults) {
