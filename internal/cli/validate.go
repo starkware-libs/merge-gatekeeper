@@ -33,6 +33,13 @@ func validateCmd() *cobra.Command {
 		Use:   "validate",
 		Short: "Validate other github actions job",
 		PreRun: func(cmd *cobra.Command, args []string) {
+			// GITHUB_REPOSITORY only fills the gap when --repo is not passed:
+			// inside GitHub Actions the env var is always set, and letting it
+			// override an explicit flag would silently point the gatekeeper at
+			// the wrong repository.
+			if cmd.Flags().Changed("repo") {
+				return
+			}
 			str := os.Getenv("GITHUB_REPOSITORY")
 			if len(str) != 0 {
 				ghRepo = str
