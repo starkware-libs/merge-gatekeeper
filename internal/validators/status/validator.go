@@ -57,10 +57,13 @@ type statusValidator struct {
 	client      github.Client
 	debugLog    DebugLog
 
-	// duplicateCheckCached is set after detectDuplicateNamedJobs has run
-	// successfully for this ref. The result is invariant per SHA, so we run
-	// the check at most once per validator instance instead of every poll.
-	duplicateCheckCached bool
+	// dupVerifiedWorkflows memoizes workflow IDs whose job names have been
+	// inspected by detectDuplicateNamedJobs and found duplicate-free. The YAML
+	// is invariant per SHA, so a workflow verified once stays verified for the
+	// whole gatekeeper run. Workflows whose runs have not materialized any
+	// jobs yet are NOT memoized — a vacuous pass proves nothing, and the
+	// guard must re-inspect them once their jobs appear.
+	dupVerifiedWorkflows map[int64]bool
 }
 
 func CreateValidator(c github.Client, opts ...Option) (validators.Validator, error) {
@@ -107,18 +110,6 @@ func (sv *statusValidator) validateFields() error {
 }
 
 func (sv *statusValidator) Validate(ctx context.Context) (validators.Status, error) {
-	// One-time precondition: fail loud if any workflow has two YAML jobs that
-	// share a display name. Same-suite same-name check runs are indistinguishable
-	// from re-runs of one job via the API, so the dedup logic in listGhaStatuses
-	// would silently drop one — masking CI signal. The YAML structure is fixed
-	// for this ref, so cache the result after the first successful run.
-	if !sv.duplicateCheckCached {
-		if err := sv.detectDuplicateNamedJobs(ctx); err != nil {
-			return nil, err
-		}
-		sv.duplicateCheckCached = true
-	}
-
 	ghaStatuses, err := sv.listGhaStatuses(ctx)
 	if err != nil {
 		return nil, err
@@ -321,18 +312,14 @@ func (sv *statusValidator) listAllWorkflowJobs(ctx context.Context, runID int64,
 // filter=latest to count names within a single workflow run; same-named
 // entries there mean the YAML really has duplicates.
 //
-// The result is invariant for a given SHA, so the caller caches success. If
-// any API call fails, we propagate the error and rely on the caller to retry
-// on the next poll.
-func (sv *statusValidator) detectDuplicateNamedJobs(ctx context.Context) error {
-	workflowRuns, err := sv.listWorkflowRunsForRef(ctx)
-	if err != nil {
-		return fmt.Errorf("duplicate-named-jobs check: failed to fetch workflow runs: %w", err)
-	}
-	if len(workflowRuns) == 0 {
-		return nil
-	}
-
+// The YAML is invariant for a given SHA, so each workflow is verified at most
+// once per validator instance (dupVerifiedWorkflows) — but only after its
+// jobs were actually listed. A run with no materialized jobs yet (queued
+// behind runner capacity, seconds after the trigger) passes vacuously and is
+// re-inspected on the next poll: caching that pass would disable the guard
+// exactly when the duplicate jobs are about to appear. If any API call fails,
+// we propagate the error and rely on the caller to retry on the next poll.
+func (sv *statusValidator) detectDuplicateNamedJobs(ctx context.Context, workflowRuns []*github.WorkflowRun) error {
 	// Pick one run per workflow_id. Any run for this SHA shares the same YAML,
 	// so we just take the highest run_number to get the most recent metadata.
 	type pickedRun struct {
@@ -346,6 +333,9 @@ func (sv *statusValidator) detectDuplicateNamedJobs(ctx context.Context) error {
 			continue
 		}
 		wid := *wr.WorkflowID
+		if sv.dupVerifiedWorkflows[wid] {
+			continue
+		}
 		runNumber := 0
 		if wr.RunNumber != nil {
 			runNumber = *wr.RunNumber
@@ -364,12 +354,20 @@ func (sv *statusValidator) detectDuplicateNamedJobs(ctx context.Context) error {
 		}
 	}
 
-	for _, pr := range perWorkflow {
+	for wid, pr := range perWorkflow {
 		jobs, err := sv.listAllWorkflowJobs(ctx, pr.runID, "latest")
 		if err != nil {
 			return fmt.Errorf(
 				"duplicate-named-jobs check: failed to list jobs for workflow %q (run %d): %w",
 				pr.workflowName, pr.runID, err)
+		}
+		if len(jobs) == 0 {
+			// Nothing materialized yet — a vacuous pass. Leave the workflow
+			// unverified so the next poll inspects it again. (No jobs also
+			// means no check runs from it to mask, so not failing is safe.)
+			sv.debugf("merge-gatekeeper [debug] duplicate-named-jobs check: workflow %q has no jobs yet, will re-check\n",
+				pr.workflowName)
+			continue
 		}
 		nameCount := make(map[string]int)
 		for _, job := range jobs {
@@ -397,6 +395,10 @@ func (sv *statusValidator) detectDuplicateNamedJobs(ctx context.Context) error {
 					"each job has a unique name, or exclude the name via --ignored.",
 				pr.workflowName, count, name)
 		}
+		if sv.dupVerifiedWorkflows == nil {
+			sv.dupVerifiedWorkflows = make(map[int64]bool)
+		}
+		sv.dupVerifiedWorkflows[wid] = true
 		sv.debugf("merge-gatekeeper [debug] duplicate-named-jobs check passed for workflow %q (%d jobs)\n",
 			pr.workflowName, len(jobs))
 	}
@@ -583,20 +585,9 @@ func preferOverExisting(run, existing *github.CheckRun, latestSuiteID int64) boo
 // need to disambiguate same-name jobs across workflows or prefer the latest
 // suite during dedup. The state is nil when no workflow runs were fetched
 // (third-party-only check runs or empty workflow runs response).
-func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults []*github.CheckRun) ([]*github.CheckRun, *refWorkflowState, error) {
-	// The workflow-runs listing is fetched even when runResults is empty or
-	// carries no check-suite IDs: live workflow runs whose check runs are not
-	// materialized yet (the placeholder synthesis below) are invisible through
-	// check runs alone, and the zero-check-runs window right after a push is
-	// exactly when that protection matters most.
-	//
-	// Fetch workflow runs for this commit. Requires actions: read permission.
-	workflowRuns, err := sv.listWorkflowRunsForRef(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to fetch workflow runs (actions: read permission required): %w", err)
-	}
+func (sv *statusValidator) filterStaleCheckRuns(runResults []*github.CheckRun, workflowRuns []*github.WorkflowRun) ([]*github.CheckRun, *refWorkflowState) {
 	if len(workflowRuns) == 0 {
-		return runResults, nil, nil
+		return runResults, nil
 	}
 
 	// Build suite_id → workflow info map. Used by listGhaStatuses to dedup by
@@ -825,7 +816,7 @@ func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults 
 			CheckSuite: &github.CheckSuite{ID: wr.CheckSuiteID},
 		})
 	}
-	return filtered, state, nil
+	return filtered, state
 }
 
 // isConfigExcludedName reports whether the raw job name is the gatekeeper's
@@ -864,15 +855,31 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	sv.debugf("merge-gatekeeper [debug] ref=%s owner=%s repo=%s combined_status_count=%d check_runs_count=%d\n",
 		sv.ref, sv.owner, sv.repo, len(combined), len(runResults))
 
+	// The workflow-runs listing backs the staleness filters, the queued-run
+	// placeholders AND the duplicate-named-jobs guard, and is fetched even
+	// when no check runs exist yet: the zero-check-runs window right after a
+	// push is exactly when the placeholder protection matters most. Requires
+	// actions: read permission.
+	workflowRuns, err := sv.listWorkflowRunsForRef(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch workflow runs (actions: read permission required): %w", err)
+	}
+
+	// Precondition guard: fail loud if any workflow has two YAML jobs sharing
+	// a display name — same-suite same-name check runs are indistinguishable
+	// from re-runs of one job, so the dedup below would silently drop one and
+	// mask CI signal. Verified workflows are memoized, so this is free on
+	// steady-state polls.
+	if err := sv.detectDuplicateNamedJobs(ctx, workflowRuns); err != nil {
+		return nil, err
+	}
+
 	// Pre-filter: remove/convert check runs whose state is stale relative to the
 	// workflow-runs listing (superseded suites, orphan suites, re-run attempts).
 	// workflowState maps each check_suite_id to the owning workflow's identity,
 	// used below to dedup by (workflow_id, name) instead of by name alone. It is
 	// nil when no workflow runs were fetched for this ref.
-	runResults, workflowState, err := sv.filterStaleCheckRuns(ctx, runResults)
-	if err != nil {
-		return nil, err
-	}
+	runResults, workflowState := sv.filterStaleCheckRuns(runResults, workflowRuns)
 
 	// workflowInfoFor returns the workflow identity for a check run's check suite.
 	// Returns the zero value (workflowID=0) when the run has no suite (third-party

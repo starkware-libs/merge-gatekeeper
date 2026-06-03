@@ -125,7 +125,11 @@ func Test_DetectDuplicateNamedJobs_NoFalsePositives(t *testing.T) {
 		selfJobName: "self-job",
 	}
 
-	if err := sv.detectDuplicateNamedJobs(context.Background()); err != nil {
+	wrs, _, err := client.ListRepositoryWorkflowRuns(context.Background(), "test-owner", "test-repo", &github.ListWorkflowRunsOptions{})
+	if err != nil {
+		t.Fatalf("mock ListRepositoryWorkflowRuns returned an unexpected error: %v", err)
+	}
+	if err := sv.detectDuplicateNamedJobs(context.Background(), wrs.WorkflowRuns); err != nil {
 		t.Fatalf("detectDuplicateNamedJobs() returned an unexpected error on a non-duplicating workflow: %v", err)
 	}
 }
