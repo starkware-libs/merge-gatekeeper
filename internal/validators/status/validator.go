@@ -354,11 +354,24 @@ func (sv *statusValidator) detectDuplicateNamedJobs(ctx context.Context) error {
 	return nil
 }
 
-// suiteWorkflowInfo identifies the workflow that owns a given check suite.
-// Used to disambiguate jobs that share a name across different workflows.
+// suiteWorkflowInfo identifies the workflow run that owns a given check suite.
+// Used to disambiguate jobs that share a name across different workflows, and
+// to keep runs of one workflow from different trigger events independent.
 type suiteWorkflowInfo struct {
 	workflowID   int64
 	workflowName string
+	event        string
+}
+
+// workflowEventKey identifies one stream of runs of a workflow: re-triggers
+// for the same event supersede each other, while runs from different events
+// (e.g. `on: [push, pull_request]` firing twice at the same SHA) are
+// independent, concurrently-legitimate CI — the pull_request run executes the
+// merge ref and the push run the branch head, so neither stands in for the
+// other.
+type workflowEventKey struct {
+	workflowID int64
+	event      string
 }
 
 // workflowLatest describes a workflow's latest non-cancelled run for this ref.
@@ -375,8 +388,16 @@ type workflowLatest struct {
 // non-cancelled run. nil when no workflow runs were fetched.
 type refWorkflowState struct {
 	suiteToWorkflow       map[int64]suiteWorkflowInfo
-	latestSuiteByWorkflow map[int64]int64
+	latestSuiteByWorkflow map[workflowEventKey]int64
 	latestRunBySuite      map[int64]*workflowLatest
+}
+
+// eventOf returns the trigger event of a workflow run ("" when absent).
+func eventOf(wr *github.WorkflowRun) string {
+	if wr.Event != nil {
+		return *wr.Event
+	}
+	return ""
 }
 
 const githubActionsAppSlug = "github-actions"
@@ -483,9 +504,12 @@ func preferOverExisting(run, existing *github.CheckRun, latestSuiteID int64) boo
 // "Re-run all jobs" re-executes succeeded jobs too. Three kinds of staleness
 // are handled:
 //
-//  1. Superseded suites: a newer non-cancelled run of the same workflow exists.
-//     Superseding run still in progress → convert to pending (replacement may
-//     still produce a result); completed → drop (job not needed anymore).
+//  1. Superseded suites: a newer non-cancelled run of the same workflow AND
+//     the same trigger event exists. Superseding run still in progress →
+//     convert to pending (replacement may still produce a result); completed →
+//     drop (job not needed anymore). Runs from different events are never
+//     superseded by each other — `on: [push, pull_request]` legitimately runs
+//     a workflow twice at one SHA and both results count.
 //
 //  2. Orphan suites: a github-actions check run whose suite has no workflow run
 //     in the listing. Every Actions check run belongs to a workflow run, so the
@@ -534,14 +558,14 @@ func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults 
 	// are tracked independently rather than collapsed by suite-ID ordering.
 	state := &refWorkflowState{
 		suiteToWorkflow:       make(map[int64]suiteWorkflowInfo, len(workflowRuns)),
-		latestSuiteByWorkflow: make(map[int64]int64),
+		latestSuiteByWorkflow: make(map[workflowEventKey]int64),
 		latestRunBySuite:      make(map[int64]*workflowLatest),
 	}
 	for _, wr := range workflowRuns {
 		if wr.CheckSuiteID == nil {
 			continue
 		}
-		info := suiteWorkflowInfo{}
+		info := suiteWorkflowInfo{event: eventOf(wr)}
 		if wr.WorkflowID != nil {
 			info.workflowID = *wr.WorkflowID
 		}
@@ -551,8 +575,11 @@ func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults 
 		state.suiteToWorkflow[*wr.CheckSuiteID] = info
 	}
 
-	// For each workflow, find the latest non-cancelled run by (RunNumber, RunAttempt).
-	perWorkflow := make(map[int64]*workflowLatest) // keyed by WorkflowID
+	// For each (workflow, event), find the latest non-cancelled run by
+	// (RunNumber, RunAttempt). Scoped by event: only a re-trigger of the same
+	// event supersedes a run — `on: [push, pull_request]` runs twice at one
+	// SHA and both runs are current.
+	perWorkflow := make(map[workflowEventKey]*workflowLatest)
 	for _, wr := range workflowRuns {
 		if wr.WorkflowID == nil || wr.CheckSuiteID == nil {
 			continue
@@ -573,10 +600,10 @@ func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults 
 		if wr.Status != nil {
 			st = *wr.Status
 		}
-		wid := *wr.WorkflowID
-		existing, ok := perWorkflow[wid]
+		wek := workflowEventKey{workflowID: *wr.WorkflowID, event: eventOf(wr)}
+		existing, ok := perWorkflow[wek]
 		if !ok || rn > existing.runNumber || (rn == existing.runNumber && ra > existing.runAttempt) {
-			perWorkflow[wid] = &workflowLatest{
+			perWorkflow[wek] = &workflowLatest{
 				runNumber:    rn,
 				runAttempt:   ra,
 				suiteID:      *wr.CheckSuiteID,
@@ -585,21 +612,22 @@ func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults 
 			}
 		}
 	}
-	for workflowID, latest := range perWorkflow {
-		state.latestSuiteByWorkflow[workflowID] = latest.suiteID
+	for wek, latest := range perWorkflow {
+		state.latestSuiteByWorkflow[wek] = latest.suiteID
 		state.latestRunBySuite[latest.suiteID] = latest
 	}
 
 	// Build supersededSuites: map from CheckSuiteID → superseding run's Status.
-	// A suite is superseded if it belongs to a workflow that has a newer non-cancelled run.
+	// A suite is superseded if it belongs to a (workflow, event) that has a
+	// newer non-cancelled run.
 	supersededSuites := make(map[int64]string) // suiteID → superseding run status
 	for _, wr := range workflowRuns {
 		if wr.WorkflowID == nil || wr.CheckSuiteID == nil {
 			continue
 		}
-		latest, ok := perWorkflow[*wr.WorkflowID]
+		latest, ok := perWorkflow[workflowEventKey{workflowID: *wr.WorkflowID, event: eventOf(wr)}]
 		if !ok {
-			// All runs of this workflow are cancelled — nothing superseded.
+			// All runs of this (workflow, event) are cancelled — nothing superseded.
 			continue
 		}
 		if *wr.CheckSuiteID != latest.suiteID {
@@ -731,13 +759,18 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		return workflowState.suiteToWorkflow[*run.CheckSuite.ID]
 	}
 
-	// Dedup key: (workflow_id, name). Within a single workflow, re-runs and
-	// concurrency-cancelled runs collapse via the suite-ID/run-ID tiebreaker
-	// below. Across workflows, jobs with the same name remain independent —
-	// otherwise a "benchmarking" job in workflow A could mask the state of a
-	// "benchmarking" job in workflow B (see PR starkware-libs/sequencer#13859).
+	// Dedup key: (workflow_id, event, name). Within a single workflow-event
+	// stream, re-runs and concurrency-cancelled runs collapse via the
+	// suite-ID/run-ID tiebreaker below. Across workflows, jobs with the same
+	// name remain independent — otherwise a "benchmarking" job in workflow A
+	// could mask the state of a "benchmarking" job in workflow B (see PR
+	// starkware-libs/sequencer#13859). Across events of one workflow, runs are
+	// likewise independent: `on: [push, pull_request]` executes the same job
+	// twice at one SHA, and the pull_request result must not stand in for the
+	// push result (or vice versa).
 	type workflowJobKey struct {
 		workflowID int64
+		event      string
 		name       string
 	}
 	latestRunByKey := make(map[workflowJobKey]*github.CheckRun)
@@ -747,7 +780,8 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 			return nil, fmt.Errorf("%w name: %v, status: %v", ErrInvalidCheckRunResponse, run.Name, run.Status)
 		}
 		name := *run.Name
-		key := workflowJobKey{workflowID: workflowInfoFor(run).workflowID, name: name}
+		info := workflowInfoFor(run)
+		key := workflowJobKey{workflowID: info.workflowID, event: info.event, name: name}
 		runCountByKey[key]++
 		existing, ok := latestRunByKey[key]
 		if !ok {
@@ -756,7 +790,7 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		}
 		latestSuiteID := int64(0)
 		if workflowState != nil {
-			latestSuiteID = workflowState.latestSuiteByWorkflow[key.workflowID]
+			latestSuiteID = workflowState.latestSuiteByWorkflow[workflowEventKey{workflowID: key.workflowID, event: key.event}]
 		}
 		if preferOverExisting(run, existing, latestSuiteID) {
 			sv.debugf("merge-gatekeeper [debug] job=%s workflow=%d: picked run id=%v suite=%v status=%s (replaced run id=%v suite=%v status=%s)\n",
@@ -791,7 +825,10 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		if keys[i].name != keys[j].name {
 			return keys[i].name < keys[j].name
 		}
-		return keys[i].workflowID < keys[j].workflowID
+		if keys[i].workflowID != keys[j].workflowID {
+			return keys[i].workflowID < keys[j].workflowID
+		}
+		return keys[i].event < keys[j].event
 	})
 
 	displayNames := make(map[workflowJobKey]string, len(keys))
@@ -839,7 +876,8 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	isMatrixParent := make(map[workflowJobKey]bool)
 	for _, key := range keys {
 		for _, otherKey := range keys {
-			if key.workflowID == otherKey.workflowID && key.name != otherKey.name && strings.HasPrefix(otherKey.name, key.name+" (") {
+			if key.workflowID == otherKey.workflowID && key.event == otherKey.event &&
+				key.name != otherKey.name && strings.HasPrefix(otherKey.name, key.name+" (") {
 				isMatrixParent[key] = true
 				break
 			}
