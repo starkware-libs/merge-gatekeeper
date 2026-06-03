@@ -466,7 +466,7 @@ type workflowLatest struct {
 
 // refWorkflowState is what the workflow-runs listing says about this ref: which
 // workflow owns each check suite and which suite holds each workflow's latest
-// non-cancelled run. nil when no workflow runs were fetched.
+// non-cancelled run. Empty (all maps zero-length) when the listing had no runs.
 type refWorkflowState struct {
 	suiteToWorkflow       map[int64]suiteWorkflowInfo
 	latestSuiteByWorkflow map[workflowEventKey]int64
@@ -613,13 +613,15 @@ func preferOverExisting(run, existing *github.CheckRun, latestSuiteID int64) boo
 //
 // Also returns the refWorkflowState used for these decisions, for callers that
 // need to disambiguate same-name jobs across workflows or prefer the latest
-// suite during dedup. The state is nil when no workflow runs were fetched
-// (third-party-only check runs or empty workflow runs response).
+// suite during dedup. The state is empty (not nil) when the listing returned
+// no runs: an EMPTY listing must still soften github-actions check runs via
+// the orphan rule below — it is the n=all case of the same PR#14205
+// inconsistency a partially-missing listing exhibits, and an early return
+// here would let a transiently-orphaned cancelled/failed check run turn the
+// gatekeeper red (or a stale success keep counting) before the listing
+// becomes consistent. Third-party check runs never have workflow runs, so an
+// empty listing leaves them untouched either way.
 func (sv *statusValidator) filterStaleCheckRuns(runResults []*github.CheckRun, workflowRuns []*github.WorkflowRun) ([]*github.CheckRun, *refWorkflowState) {
-	if len(workflowRuns) == 0 {
-		return runResults, nil
-	}
-
 	// Build suite_id → workflow info map. Used by listGhaStatuses to dedup by
 	// (workflow_id, name) so that two workflows defining a job with the same
 	// name (e.g. both Committer-CI and Blockifier-CI defining "benchmarking")
@@ -921,7 +923,7 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	// workflow-runs listing (superseded suites, orphan suites, re-run attempts).
 	// workflowState maps each check_suite_id to the owning workflow's identity,
 	// used below to dedup by (workflow_id, name) instead of by name alone. It is
-	// nil when no workflow runs were fetched for this ref.
+	// empty when the listing had no runs for this ref.
 	runResults, workflowState := sv.filterStaleCheckRuns(runResults, workflowRuns)
 
 	// workflowInfoFor returns the workflow identity for a check run's check suite.
