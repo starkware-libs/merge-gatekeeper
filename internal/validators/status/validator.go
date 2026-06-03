@@ -580,18 +580,12 @@ func preferOverExisting(run, existing *github.CheckRun, latestSuiteID int64) boo
 // suite during dedup. The state is nil when no workflow runs were fetched
 // (third-party-only check runs or empty workflow runs response).
 func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults []*github.CheckRun) ([]*github.CheckRun, *refWorkflowState, error) {
-	// Without any check suite there is nothing to correlate with workflow runs.
-	hasSuites := false
-	for _, run := range runResults {
-		if suiteIDOf(run) != 0 {
-			hasSuites = true
-			break
-		}
-	}
-	if !hasSuites {
-		return runResults, nil, nil
-	}
-
+	// The workflow-runs listing is fetched even when runResults is empty or
+	// carries no check-suite IDs: live workflow runs whose check runs are not
+	// materialized yet (the placeholder synthesis below) are invisible through
+	// check runs alone, and the zero-check-runs window right after a push is
+	// exactly when that protection matters most.
+	//
 	// Fetch workflow runs for this commit. Requires actions: read permission.
 	workflowRuns, err := sv.listWorkflowRunsForRef(ctx)
 	if err != nil {
