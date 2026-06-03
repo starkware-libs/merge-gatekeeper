@@ -675,6 +675,22 @@ func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults 
 	return filtered, state, nil
 }
 
+// isConfigExcludedName reports whether the raw job name is the gatekeeper's
+// own job (--self) or an explicitly ignored job (--ignored). Validate treats
+// these as always-successful by comparing the configured names against each
+// tracked job's display name, so callers must keep such names un-renamed.
+func (sv *statusValidator) isConfigExcludedName(name string) bool {
+	if name == sv.selfJobName {
+		return true
+	}
+	for _, ignored := range sv.ignoredJobs {
+		if name == ignored {
+			return true
+		}
+	}
+	return false
+}
+
 func (sv *statusValidator) debugf(format string, args ...interface{}) {
 	if sv.debugLog != nil {
 		sv.debugLog(format, args...)
@@ -781,7 +797,12 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	displayNames := make(map[workflowJobKey]string, len(keys))
 	collisionDetected := false
 	for _, key := range keys {
-		if len(rawNameWorkflows[key.name]) <= 1 {
+		// Config-excluded names (--self/--ignored) are matched by Validate
+		// against raw YAML job names, so they must never be disambiguated:
+		// a renamed "<self> [Workflow]" would stop matching selfJobName and
+		// the gatekeeper would wait on its own check run forever, and a
+		// renamed ignored job would lose its ignore.
+		if len(rawNameWorkflows[key.name]) <= 1 || sv.isConfigExcludedName(key.name) {
 			displayNames[key] = key.name
 			continue
 		}
