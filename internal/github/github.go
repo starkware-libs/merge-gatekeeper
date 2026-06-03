@@ -46,6 +46,8 @@ type Client interface {
 	ListCheckRunsForRef(ctx context.Context, owner, repo, ref string, opts *ListCheckRunsOptions) (*ListCheckRunsResults, *Response, error)
 	ListRepositoryWorkflowRuns(ctx context.Context, owner, repo string, opts *ListWorkflowRunsOptions) (*WorkflowRuns, *Response, error)
 	ListWorkflowJobs(ctx context.Context, owner, repo string, runID int64, opts *ListWorkflowJobsOptions) (*Jobs, *Response, error)
+	// GetCommitSHA1 resolves any ref (branch, tag, short SHA) to a full commit SHA.
+	GetCommitSHA1(ctx context.Context, owner, repo, ref string) (string, *Response, error)
 }
 
 type client struct {
@@ -83,6 +85,12 @@ func (c *client) ListRepositoryWorkflowRuns(ctx context.Context, owner, repo str
 func (c *client) ListWorkflowJobs(ctx context.Context, owner, repo string, runID int64, opts *ListWorkflowJobsOptions) (*Jobs, *Response, error) {
 	return withRetry(ctx, defaultMaxRetries, defaultRetryDelay, func() (*Jobs, *Response, error) {
 		return c.ghc.Actions.ListWorkflowJobs(ctx, owner, repo, runID, opts)
+	})
+}
+
+func (c *client) GetCommitSHA1(ctx context.Context, owner, repo, ref string) (string, *Response, error) {
+	return withRetry(ctx, defaultMaxRetries, defaultRetryDelay, func() (string, *Response, error) {
+		return c.ghc.Repositories.GetCommitSHA1(ctx, owner, repo, ref, "")
 	})
 }
 

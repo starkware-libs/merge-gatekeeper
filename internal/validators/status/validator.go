@@ -230,12 +230,40 @@ func (sv *statusValidator) listCheckRunsForRef(ctx context.Context) ([]*github.C
 
 const maxWorkflowRunsPerPage = 100
 
+// isFullSHA reports whether ref is a full 40-hex commit SHA.
+func isFullSHA(ref string) bool {
+	if len(ref) != 40 {
+		return false
+	}
+	for _, c := range ref {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
 func (sv *statusValidator) listWorkflowRunsForRef(ctx context.Context) ([]*github.WorkflowRun, error) {
+	// The workflow-runs listing filters by EXACT head SHA — unlike the
+	// check-runs and combined-status endpoints it does not accept branch or
+	// tag names (--ref documents all three). An unresolved branch ref would
+	// silently return an empty listing and switch off every protection built
+	// on it (per-workflow dedup, supersede/orphan/stale-attempt filtering,
+	// queued-run tracking) — resurrecting the PR#13862 masking bug.
+	headSHA := sv.ref
+	if !isFullSHA(headSHA) {
+		resolved, _, err := sv.client.GetCommitSHA1(ctx, sv.owner, sv.repo, sv.ref)
+		if err != nil {
+			return nil, &validators.TransientError{Err: fmt.Errorf("failed to resolve ref %q to a commit SHA: %w", sv.ref, err)}
+		}
+		headSHA = resolved
+	}
+
 	var runs []*github.WorkflowRun
 	page := 1
 	for {
 		wr, _, err := sv.client.ListRepositoryWorkflowRuns(ctx, sv.owner, sv.repo, &github.ListWorkflowRunsOptions{
-			HeadSHA:     sv.ref,
+			HeadSHA:     headSHA,
 			ListOptions: github.ListOptions{Page: page, PerPage: maxWorkflowRunsPerPage},
 		})
 		if err != nil {

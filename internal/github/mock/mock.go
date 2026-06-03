@@ -11,6 +11,7 @@ type Client struct {
 	ListCheckRunsForRefFunc          func(ctx context.Context, owner, repo, ref string, opts *github.ListCheckRunsOptions) (*github.ListCheckRunsResults, *github.Response, error)
 	ListRepositoryWorkflowRunsFunc   func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error)
 	ListWorkflowJobsFunc             func(ctx context.Context, owner, repo string, runID int64, opts *github.ListWorkflowJobsOptions) (*github.Jobs, *github.Response, error)
+	GetCommitSHA1Func                func(ctx context.Context, owner, repo, ref string) (string, *github.Response, error)
 }
 
 func (c *Client) GetCombinedStatus(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
@@ -37,6 +38,15 @@ func (c *Client) ListWorkflowJobs(ctx context.Context, owner, repo string, runID
 	// Default: return empty job list. The duplicate-name detection is a no-op when
 	// no jobs are reported, preserving backward compatibility with existing tests.
 	return &github.Jobs{}, nil, nil
+}
+
+func (c *Client) GetCommitSHA1(ctx context.Context, owner, repo, ref string) (string, *github.Response, error) {
+	if c.GetCommitSHA1Func != nil {
+		return c.GetCommitSHA1Func(ctx, owner, repo, ref)
+	}
+	// Default: return the ref unchanged (treat it as already being a SHA).
+	// Preserves backward compatibility with tests that don't set up this mock.
+	return ref, nil, nil
 }
 
 var (
