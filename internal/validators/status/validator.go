@@ -787,15 +787,18 @@ func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults 
 			// Terminal sibling of the queued-run case: a run that failed
 			// before creating any job — most commonly startup_failure from a
 			// workflow-file error introduced at this SHA — is red in the UI
-			// but invisible via check runs. Track it as a failure; other
-			// empty completed runs (success, cancelled, skipped) stay
-			// invisible as before.
+			// but invisible via check runs. So is a run blocked on approval
+			// (fork PRs: completed/action_required, zero check runs), whose
+			// CI never ran at all; check runs concluding action_required
+			// already gate red, so the empty-run path must too. Track these
+			// as failures; other empty completed runs (success, cancelled,
+			// skipped) stay invisible as before.
 			conclusion := ""
 			if wr.Conclusion != nil {
 				conclusion = *wr.Conclusion
 			}
 			switch conclusion {
-			case "failure", "startup_failure", "timed_out":
+			case "failure", "startup_failure", "timed_out", "action_required":
 				// Square brackets on purpose: a "Name (...)" placeholder would
 				// trip the matrix-parent heuristic for a job named like the workflow.
 				placeholderName := fmt.Sprintf("%s [run %s]", workflowName, conclusion)
