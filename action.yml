@@ -6,6 +6,8 @@ branding:
   # Required permissions: checks: read, statuses: read, actions: read
   # actions: read is needed to detect superseded workflow runs, which prevents
   # false failures when concurrent runs cancel each other.
+  # contents: read is additionally needed when ref is a branch or tag name
+  # (it is resolved to a commit SHA via the commits API).
 inputs:
   token:
     description: "GitHub token (defaults to github.token when omitted; or set GITHUB_TOKEN env)"
