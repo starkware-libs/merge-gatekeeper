@@ -23,10 +23,12 @@ type (
 )
 
 type (
+	App                  = github.App
 	CheckRun             = github.CheckRun
 	CheckSuite           = github.CheckSuite
 	ListCheckRunsOptions = github.ListCheckRunsOptions
 	ListCheckRunsResults = github.ListCheckRunsResults
+	Timestamp            = github.Timestamp
 )
 
 type (

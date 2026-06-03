@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/starkware-libs/merge-gatekeeper/internal/github"
 	"github.com/starkware-libs/merge-gatekeeper/internal/github/mock"
@@ -15,6 +16,10 @@ import (
 
 func stringPtr(str string) *string {
 	return &str
+}
+
+func timestampPtr(t time.Time) *github.Timestamp {
+	return &github.Timestamp{Time: t}
 }
 
 func int64Ptr(i int64) *int64 {
@@ -1441,9 +1446,10 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 				},
 			}
 		}(),
-		"superseded suite: single suite skips workflow runs API": func() test {
-			// Only one suite — no workflow runs API call should be made.
-			// ListRepositoryWorkflowRunsFunc panics if called, proving it's not invoked.
+		"single suite: workflow runs listing fetched for staleness checks": func() test {
+			// Even with one suite the workflow runs listing is fetched — re-run
+			// attempts reuse their suite, so stale-attempt detection needs the
+			// listing when nothing can be superseded.
 			c := &mock.Client{
 				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
 					return &github.CombinedStatus{}, nil, nil
@@ -1469,7 +1475,14 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 					}, nil, nil
 				},
 				ListRepositoryWorkflowRunsFunc: func(ctx context.Context, owner, repo string, opts *github.ListWorkflowRunsOptions) (*github.WorkflowRuns, *github.Response, error) {
-					panic("ListRepositoryWorkflowRuns should not be called for single suite")
+					wfID := int64(1)
+					total := 1
+					return &github.WorkflowRuns{
+						TotalCount: &total,
+						WorkflowRuns: []*github.WorkflowRun{
+							{ID: int64Ptr(10), WorkflowID: &wfID, RunNumber: intPtr(1), RunAttempt: intPtr(1), CheckSuiteID: int64Ptr(100), Status: stringPtr("completed"), Conclusion: stringPtr("success")},
+						},
+					}, nil, nil
 				},
 			}
 			return test{

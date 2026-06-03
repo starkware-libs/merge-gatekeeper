@@ -361,25 +361,154 @@ type suiteWorkflowInfo struct {
 	workflowName string
 }
 
-// filterSupersededRuns removes or converts stale check runs from superseded workflow suites.
-// A suite is superseded when a newer non-cancelled run of the same workflow exists for this commit.
-// Check runs from superseded suites are handled as follows:
-//   - conclusion is success/neutral/skipped → keep (valid result, needed for "re-run failed jobs")
-//   - superseding run status != "completed" → convert to pending (replacement still in progress)
-//   - superseding run status == "completed" → drop (replacement finished, job not needed)
-//
-// Also returns a suite_id → workflow info map for callers that need to disambiguate
-// same-name jobs across workflows. The map is nil when no workflow runs were fetched
-// (single suite, third-party-only check runs, or empty workflow runs response).
-func (sv *statusValidator) filterSupersededRuns(ctx context.Context, runResults []*github.CheckRun) ([]*github.CheckRun, map[int64]suiteWorkflowInfo, error) {
-	// Count distinct non-zero suite IDs. If <=1, nothing can be superseded.
-	distinctSuiteIDs := make(map[int64]struct{})
-	for _, run := range runResults {
-		if run.CheckSuite != nil && run.CheckSuite.ID != nil && *run.CheckSuite.ID != 0 {
-			distinctSuiteIDs[*run.CheckSuite.ID] = struct{}{}
+// workflowLatest describes a workflow's latest non-cancelled run for this ref.
+type workflowLatest struct {
+	runNumber    int
+	runAttempt   int
+	suiteID      int64
+	status       string
+	runStartedAt *github.Timestamp
+}
+
+// refWorkflowState is what the workflow-runs listing says about this ref: which
+// workflow owns each check suite and which suite holds each workflow's latest
+// non-cancelled run. nil when no workflow runs were fetched.
+type refWorkflowState struct {
+	suiteToWorkflow       map[int64]suiteWorkflowInfo
+	latestSuiteByWorkflow map[int64]int64
+	latestRunBySuite      map[int64]*workflowLatest
+}
+
+const githubActionsAppSlug = "github-actions"
+
+// isGitHubActionsCheckRun reports whether the check run was created by GitHub
+// Actions, as opposed to a third-party check app (which never has workflow runs).
+func isGitHubActionsCheckRun(run *github.CheckRun) bool {
+	return run.GetApp().GetSlug() == githubActionsAppSlug
+}
+
+func suiteIDOf(run *github.CheckRun) int64 {
+	if run.CheckSuite != nil && run.CheckSuite.ID != nil {
+		return *run.CheckSuite.ID
+	}
+	return 0
+}
+
+func statusOf(run *github.CheckRun) string {
+	if run.Status == nil {
+		return "unknown"
+	}
+	return *run.Status
+}
+
+// isSettledSuccess reports whether the check run holds a conclusion that stays
+// valid across re-runs and superseding runs — re-runs don't repeat succeeded
+// jobs, so these are kept regardless of suite staleness ("re-run failed jobs").
+func isSettledSuccess(run *github.CheckRun) bool {
+	if run.Status == nil || *run.Status != checkRunCompletedStatus || run.Conclusion == nil {
+		return false
+	}
+	switch *run.Conclusion {
+	case checkRunSuccessConclusion, checkRunNeutralConclusion, checkRunSkipConclusion:
+		return true
+	}
+	return false
+}
+
+// convertToPending clones the check run as queued so a later poll re-evaluates it.
+func convertToPending(run *github.CheckRun) *github.CheckRun {
+	pendingStatus := "queued"
+	converted := *run
+	converted.Status = &pendingStatus
+	converted.Conclusion = nil
+	return &converted
+}
+
+// isStaleAttemptConclusion reports whether the check run's conclusion predates
+// the current attempt of its own suite's run. Re-run attempts reuse the check
+// suite, so until the new attempt recreates a check run, the API (filter=all)
+// still reports the previous attempt's outcome.
+func isStaleAttemptConclusion(run *github.CheckRun, latest *workflowLatest) bool {
+	if latest.runAttempt <= 1 || latest.runStartedAt == nil {
+		return false
+	}
+	if run.Status == nil || *run.Status != checkRunCompletedStatus {
+		return false
+	}
+	return run.CompletedAt != nil && run.CompletedAt.Time.Before(latest.runStartedAt.Time)
+}
+
+// preferOverExisting decides whether run should replace existing as the tracked
+// instance for a dedup key. The suite of the workflow's latest non-cancelled
+// run (latestSuiteID, 0 when unknown) wins outright: suite-ID ordering alone is
+// wrong when one of two duplicate triggers is cancelled — the cancelled run can
+// hold the higher suite ID, and its pending-converted check runs would mask the
+// surviving run's real results (sequencer PR #14205). Otherwise, suite IDs are
+// assigned in chronological order within a workflow, so the highest suite ID is
+// the latest re-run; within the same suite, run IDs break the tie because a
+// cancelled run's job can be scheduled later than the replacement run's earlier
+// jobs.
+func preferOverExisting(run, existing *github.CheckRun, latestSuiteID int64) bool {
+	thisSuiteID := suiteIDOf(run)
+	existingSuiteID := suiteIDOf(existing)
+	if latestSuiteID != 0 && thisSuiteID != existingSuiteID {
+		if thisSuiteID == latestSuiteID {
+			return true
+		}
+		if existingSuiteID == latestSuiteID {
+			return false
 		}
 	}
-	if len(distinctSuiteIDs) <= 1 {
+	thisTiebreaker := thisSuiteID
+	existingTiebreaker := existingSuiteID
+	if thisTiebreaker == existingTiebreaker {
+		if run.ID != nil {
+			thisTiebreaker = *run.ID
+		}
+		if existing.ID != nil {
+			existingTiebreaker = *existing.ID
+		}
+	}
+	return thisTiebreaker > existingTiebreaker
+}
+
+// filterStaleCheckRuns removes or converts check runs whose state is stale
+// relative to the workflow-runs listing for this ref. Successful conclusions
+// (success/neutral/skipped) are always kept — re-runs don't repeat succeeded
+// jobs, so they stay valid ("re-run failed jobs"). Three kinds of staleness
+// are handled for the rest:
+//
+//  1. Superseded suites: a newer non-cancelled run of the same workflow exists.
+//     Superseding run still in progress → convert to pending (replacement may
+//     still produce a result); completed → drop (job not needed anymore).
+//
+//  2. Orphan suites: a github-actions check run whose suite has no workflow run
+//     in the listing. Every Actions check run belongs to a workflow run, so the
+//     listing is transiently inconsistent (observed seconds after a concurrency
+//     cancellation, sequencer PR #14205) — convert terminal conclusions to
+//     pending rather than fail on half-synced state.
+//
+//  3. Stale attempts: re-runs reuse the check suite, so after "re-run failed
+//     jobs" the previous attempt's failures stay visible until the new attempt
+//     recreates each check run (sequencer PR #14106). While the latest run is
+//     executing attempt > 1, conclusions older than the attempt's start are
+//     converted to pending. Once the run completes, surviving old conclusions
+//     are final — their jobs were not part of the re-run.
+//
+// Also returns the refWorkflowState used for these decisions, for callers that
+// need to disambiguate same-name jobs across workflows or prefer the latest
+// suite during dedup. The state is nil when no workflow runs were fetched
+// (third-party-only check runs or empty workflow runs response).
+func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults []*github.CheckRun) ([]*github.CheckRun, *refWorkflowState, error) {
+	// Without any check suite there is nothing to correlate with workflow runs.
+	hasSuites := false
+	for _, run := range runResults {
+		if suiteIDOf(run) != 0 {
+			hasSuites = true
+			break
+		}
+	}
+	if !hasSuites {
 		return runResults, nil, nil
 	}
 
@@ -396,7 +525,11 @@ func (sv *statusValidator) filterSupersededRuns(ctx context.Context, runResults 
 	// (workflow_id, name) so that two workflows defining a job with the same
 	// name (e.g. both Committer-CI and Blockifier-CI defining "benchmarking")
 	// are tracked independently rather than collapsed by suite-ID ordering.
-	suiteToWorkflow := make(map[int64]suiteWorkflowInfo, len(workflowRuns))
+	state := &refWorkflowState{
+		suiteToWorkflow:       make(map[int64]suiteWorkflowInfo, len(workflowRuns)),
+		latestSuiteByWorkflow: make(map[int64]int64),
+		latestRunBySuite:      make(map[int64]*workflowLatest),
+	}
 	for _, wr := range workflowRuns {
 		if wr.CheckSuiteID == nil {
 			continue
@@ -408,16 +541,10 @@ func (sv *statusValidator) filterSupersededRuns(ctx context.Context, runResults 
 		if wr.Name != nil {
 			info.workflowName = *wr.Name
 		}
-		suiteToWorkflow[*wr.CheckSuiteID] = info
+		state.suiteToWorkflow[*wr.CheckSuiteID] = info
 	}
 
 	// For each workflow, find the latest non-cancelled run by (RunNumber, RunAttempt).
-	type workflowLatest struct {
-		runNumber  int
-		runAttempt int
-		suiteID    int64
-		status     string
-	}
 	perWorkflow := make(map[int64]*workflowLatest) // keyed by WorkflowID
 	for _, wr := range workflowRuns {
 		if wr.WorkflowID == nil || wr.CheckSuiteID == nil {
@@ -443,12 +570,17 @@ func (sv *statusValidator) filterSupersededRuns(ctx context.Context, runResults 
 		existing, ok := perWorkflow[wid]
 		if !ok || rn > existing.runNumber || (rn == existing.runNumber && ra > existing.runAttempt) {
 			perWorkflow[wid] = &workflowLatest{
-				runNumber:  rn,
-				runAttempt: ra,
-				suiteID:    *wr.CheckSuiteID,
-				status:     st,
+				runNumber:    rn,
+				runAttempt:   ra,
+				suiteID:      *wr.CheckSuiteID,
+				status:       st,
+				runStartedAt: wr.RunStartedAt,
 			}
 		}
+	}
+	for workflowID, latest := range perWorkflow {
+		state.latestSuiteByWorkflow[workflowID] = latest.suiteID
+		state.latestRunBySuite[latest.suiteID] = latest
 	}
 
 	// Build supersededSuites: map from CheckSuiteID → superseding run's Status.
@@ -468,59 +600,64 @@ func (sv *statusValidator) filterSupersededRuns(ctx context.Context, runResults 
 		}
 	}
 
-	if len(supersededSuites) == 0 {
-		return runResults, suiteToWorkflow, nil
+	if len(supersededSuites) != 0 {
+		sv.debugf("merge-gatekeeper [debug] superseded suites detected: %d suite(s) from %d workflow run(s)\n",
+			len(supersededSuites), len(workflowRuns))
 	}
 
-	sv.debugf("merge-gatekeeper [debug] superseded suites detected: %d suite(s) from %d workflow run(s)\n",
-		len(supersededSuites), len(workflowRuns))
-
-	// Filter check runs from superseded suites.
 	filtered := make([]*github.CheckRun, 0, len(runResults))
 	for _, run := range runResults {
-		suiteID := int64(0)
-		if run.CheckSuite != nil && run.CheckSuite.ID != nil {
-			suiteID = *run.CheckSuite.ID
-		}
-		supersedingStatus, isSuperseded := supersededSuites[suiteID]
-		if !isSuperseded {
-			filtered = append(filtered, run)
-			continue
-		}
-
+		suiteID := suiteIDOf(run)
 		name := ""
 		if run.Name != nil {
 			name = *run.Name
 		}
 
-		// Keep successful/neutral/skipped checks from superseded suites (valid results).
-		if run.Status != nil && *run.Status == checkRunCompletedStatus && run.Conclusion != nil {
-			switch *run.Conclusion {
-			case checkRunSuccessConclusion, checkRunNeutralConclusion, checkRunSkipConclusion:
-				sv.debugf("merge-gatekeeper [debug] job=%s: keeping %s check from superseded suite %d\n",
-					name, *run.Conclusion, suiteID)
-				filtered = append(filtered, run)
-				continue
-			}
+		if isSettledSuccess(run) {
+			filtered = append(filtered, run)
+			continue
 		}
 
-		if supersedingStatus != checkRunCompletedStatus {
-			// Superseding run is still in progress — convert to pending.
-			// Clone the check run to avoid mutating the original.
-			pendingStatus := "queued"
-			converted := *run
-			converted.Status = &pendingStatus
-			converted.Conclusion = nil
-			sv.debugf("merge-gatekeeper [debug] job=%s: converted to pending (superseded suite %d, superseding run %s)\n",
-				name, suiteID, supersedingStatus)
-			filtered = append(filtered, &converted)
-		} else {
-			// Superseding run completed — drop the stale check.
-			sv.debugf("merge-gatekeeper [debug] job=%s: dropped from superseded suite %d (superseding run completed)\n",
-				name, suiteID)
+		if supersedingStatus, isSuperseded := supersededSuites[suiteID]; isSuperseded {
+			if supersedingStatus != checkRunCompletedStatus {
+				// Superseding run is still in progress — convert to pending.
+				sv.debugf("merge-gatekeeper [debug] job=%s: converted to pending (superseded suite %d, superseding run %s)\n",
+					name, suiteID, supersedingStatus)
+				filtered = append(filtered, convertToPending(run))
+			} else {
+				// Superseding run completed — drop the stale check.
+				sv.debugf("merge-gatekeeper [debug] job=%s: dropped from superseded suite %d (superseding run completed)\n",
+					name, suiteID)
+			}
+			continue
 		}
+
+		// Orphan suite: the listing is transiently inconsistent — soften
+		// terminal conclusions to pending and let a later poll decide.
+		if _, known := state.suiteToWorkflow[suiteID]; !known && isGitHubActionsCheckRun(run) {
+			if run.Status != nil && *run.Status == checkRunCompletedStatus {
+				sv.debugf("merge-gatekeeper [debug] job=%s: converted to pending (suite %d missing from workflow-runs listing)\n",
+					name, suiteID)
+				filtered = append(filtered, convertToPending(run))
+			} else {
+				filtered = append(filtered, run)
+			}
+			continue
+		}
+
+		// Stale attempt: the conclusion predates the in-progress re-run attempt
+		// of its own suite — the attempt may be about to replace it.
+		if latest, ok := state.latestRunBySuite[suiteID]; ok &&
+			isStaleAttemptConclusion(run, latest) && latest.status != checkRunCompletedStatus {
+			sv.debugf("merge-gatekeeper [debug] job=%s: converted to pending (conclusion predates attempt %d of suite %d)\n",
+				name, latest.runAttempt, suiteID)
+			filtered = append(filtered, convertToPending(run))
+			continue
+		}
+
+		filtered = append(filtered, run)
 	}
-	return filtered, suiteToWorkflow, nil
+	return filtered, state, nil
 }
 
 func (sv *statusValidator) debugf(format string, args ...interface{}) {
@@ -543,23 +680,24 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	sv.debugf("merge-gatekeeper [debug] ref=%s owner=%s repo=%s combined_status_count=%d check_runs_count=%d\n",
 		sv.ref, sv.owner, sv.repo, len(combined), len(runResults))
 
-	// Pre-filter: remove/convert stale check runs from superseded workflow suites.
-	// suiteToWorkflow maps each check_suite_id to the owning workflow's identity,
-	// used below to dedup by (workflow_id, name) instead of by name alone. The map
-	// is nil when only one workflow suite exists for this ref.
-	runResults, suiteToWorkflow, err := sv.filterSupersededRuns(ctx, runResults)
+	// Pre-filter: remove/convert check runs whose state is stale relative to the
+	// workflow-runs listing (superseded suites, orphan suites, re-run attempts).
+	// workflowState maps each check_suite_id to the owning workflow's identity,
+	// used below to dedup by (workflow_id, name) instead of by name alone. It is
+	// nil when no workflow runs were fetched for this ref.
+	runResults, workflowState, err := sv.filterStaleCheckRuns(ctx, runResults)
 	if err != nil {
 		return nil, err
 	}
 
 	// workflowInfoFor returns the workflow identity for a check run's check suite.
 	// Returns the zero value (workflowID=0) when the run has no suite (third-party
-	// integrations) or when no workflow run map was loaded (single-suite ref).
+	// integrations) or when no workflow run map was loaded.
 	workflowInfoFor := func(run *github.CheckRun) suiteWorkflowInfo {
-		if suiteToWorkflow == nil || run.CheckSuite == nil || run.CheckSuite.ID == nil {
+		if workflowState == nil || run.CheckSuite == nil || run.CheckSuite.ID == nil {
 			return suiteWorkflowInfo{}
 		}
-		return suiteToWorkflow[*run.CheckSuite.ID]
+		return workflowState.suiteToWorkflow[*run.CheckSuite.ID]
 	}
 
 	// Dedup key: (workflow_id, name). Within a single workflow, re-runs and
@@ -585,51 +723,17 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 			latestRunByKey[key] = run
 			continue
 		}
-		thisSuiteID := int64(0)
-		if run.CheckSuite != nil && run.CheckSuite.ID != nil {
-			thisSuiteID = *run.CheckSuite.ID
+		latestSuiteID := int64(0)
+		if workflowState != nil {
+			latestSuiteID = workflowState.latestSuiteByWorkflow[key.workflowID]
 		}
-		existingSuiteID := int64(0)
-		if existing.CheckSuite != nil && existing.CheckSuite.ID != nil {
-			existingSuiteID = *existing.CheckSuite.ID
-		}
-		// Compare by suite ID; if equal (including both zero / no suite), fall back to run ID.
-		// Within the same workflow, suite IDs are assigned in chronological order, so the
-		// highest suite ID is the latest re-run. Run IDs can be out-of-order when a cancelled
-		// run's job was scheduled later than the replacement run's earlier jobs.
-		thisTiebreaker := thisSuiteID
-		existingTiebreaker := existingSuiteID
-		if thisTiebreaker == existingTiebreaker {
-			if run.ID != nil {
-				thisTiebreaker = *run.ID
-			}
-			if existing.ID != nil {
-				existingTiebreaker = *existing.ID
-			}
-		}
-		if thisTiebreaker > existingTiebreaker {
-			statusStr := "unknown"
-			if run.Status != nil {
-				statusStr = *run.Status
-			}
-			existingStatusStr := "unknown"
-			if existing.Status != nil {
-				existingStatusStr = *existing.Status
-			}
+		if preferOverExisting(run, existing, latestSuiteID) {
 			sv.debugf("merge-gatekeeper [debug] job=%s workflow=%d: picked run id=%v suite=%v status=%s (replaced run id=%v suite=%v status=%s)\n",
-				name, key.workflowID, run.ID, thisSuiteID, statusStr, existing.ID, existingSuiteID, existingStatusStr)
+				name, key.workflowID, run.ID, suiteIDOf(run), statusOf(run), existing.ID, suiteIDOf(existing), statusOf(existing))
 			latestRunByKey[key] = run
 		} else {
-			statusStr := "unknown"
-			if run.Status != nil {
-				statusStr = *run.Status
-			}
-			existingStatusStr := "unknown"
-			if existing.Status != nil {
-				existingStatusStr = *existing.Status
-			}
 			sv.debugf("merge-gatekeeper [debug] job=%s workflow=%d: keeping run id=%v suite=%v status=%s (dropped run id=%v suite=%v status=%s)\n",
-				name, key.workflowID, existing.ID, existingSuiteID, existingStatusStr, run.ID, thisSuiteID, statusStr)
+				name, key.workflowID, existing.ID, suiteIDOf(existing), statusOf(existing), run.ID, suiteIDOf(run), statusOf(run))
 		}
 	}
 
