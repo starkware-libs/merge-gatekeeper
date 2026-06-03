@@ -700,6 +700,48 @@ func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults 
 
 		filtered = append(filtered, run)
 	}
+
+	// Live workflow runs whose suites have produced no check runs yet would
+	// otherwise be invisible: the gatekeeper tracks check runs only, so an
+	// all-green poll could green-light the PR before such a run's jobs are
+	// materialized (queued behind runner capacity or a concurrency group, or
+	// in the window right after the trigger). Synthesize a pending placeholder
+	// so the gatekeeper waits for the run's jobs to appear.
+	suitesWithCheckRuns := make(map[int64]struct{}, len(runResults))
+	for _, run := range runResults {
+		if id := suiteIDOf(run); id != 0 {
+			suitesWithCheckRuns[id] = struct{}{}
+		}
+	}
+	for _, wr := range workflowRuns {
+		if wr.CheckSuiteID == nil || wr.Status == nil || *wr.Status == checkRunCompletedStatus {
+			continue
+		}
+		if _, ok := suitesWithCheckRuns[*wr.CheckSuiteID]; ok {
+			continue
+		}
+		if _, superseded := supersededSuites[*wr.CheckSuiteID]; superseded {
+			continue
+		}
+		workflowName := ""
+		if wr.Name != nil {
+			workflowName = *wr.Name
+		}
+		if workflowName == "" {
+			workflowName = fmt.Sprintf("workflow:%d", state.suiteToWorkflow[*wr.CheckSuiteID].workflowID)
+		}
+		// Square brackets on purpose: a "Name (...)" placeholder would trip the
+		// matrix-parent heuristic for a real job named like the workflow.
+		placeholderName := fmt.Sprintf("%s [workflow starting]", workflowName)
+		pendingStatus := "queued"
+		sv.debugf("merge-gatekeeper [debug] suite %d (workflow %q, run status %s) has no check runs yet: tracking placeholder %q\n",
+			*wr.CheckSuiteID, workflowName, *wr.Status, placeholderName)
+		filtered = append(filtered, &github.CheckRun{
+			Name:       &placeholderName,
+			Status:     &pendingStatus,
+			CheckSuite: &github.CheckSuite{ID: wr.CheckSuiteID},
+		})
+	}
 	return filtered, state, nil
 }
 
