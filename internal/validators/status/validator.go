@@ -71,6 +71,14 @@ type statusValidator struct {
 	// YAML job — the matrix-parent heuristic must not swallow it just because
 	// "name (...)" siblings exist in the same workflow.
 	currentJobNamesByWorkflow map[int64]map[string]struct{}
+
+	// lastResolvedHeadSHA is the head SHA the memo maps above were built
+	// against. Both maps cache facts about the YAML "for a given SHA" — but a
+	// branch/tag --ref re-resolves every poll, and a mid-run push moves the
+	// head. A SHA change invalidates them: keeping the old verification would
+	// blind the duplicate-named-jobs guard to duplicates introduced by the
+	// push, and feed the matrix-parent heuristic the previous SHA's job set.
+	lastResolvedHeadSHA string
 }
 
 func CreateValidator(c github.Client, opts ...Option) (validators.Validator, error) {
@@ -255,6 +263,17 @@ func (sv *statusValidator) listWorkflowRunsForRef(ctx context.Context) ([]*githu
 			return nil, &validators.TransientError{Err: fmt.Errorf("failed to resolve ref %q to a commit SHA: %w", sv.ref, err)}
 		}
 		headSHA = resolved
+	}
+	if headSHA != sv.lastResolvedHeadSHA {
+		if sv.lastResolvedHeadSHA != "" {
+			// The branch/tag advanced mid-run: every memoized fact about the
+			// previous head's YAML is stale for the new head.
+			sv.debugf("merge-gatekeeper [debug] ref %q moved from %s to %s: resetting per-SHA workflow memoization\n",
+				sv.ref, sv.lastResolvedHeadSHA, headSHA)
+			sv.dupVerifiedWorkflows = nil
+			sv.currentJobNamesByWorkflow = nil
+		}
+		sv.lastResolvedHeadSHA = headSHA
 	}
 
 	var runs []*github.WorkflowRun
