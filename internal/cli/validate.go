@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -112,6 +113,16 @@ func debug(logger logger, name string) func() {
 }
 
 func doValidateCmd(ctx context.Context, logger logger, vs ...validators.Validator) error {
+	// Reject nonsensical values up front: interval=0 would panic in
+	// time.NewTicker and timeout=0 would die with a bare "context deadline
+	// exceeded" — both one action-input typo away.
+	if validateIntervalSeconds == 0 {
+		return errors.New("invalid configuration: interval must be at least 1 second")
+	}
+	if timeoutSecond == 0 {
+		return errors.New("invalid configuration: timeout must be at least 1 second")
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSecond)*time.Second)
 	defer cancel()
 
