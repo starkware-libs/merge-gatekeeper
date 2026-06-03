@@ -472,10 +472,11 @@ func statusOf(run *github.CheckRun) string {
 }
 
 // isSettledSuccess reports whether the check run holds a conclusion that stays
-// valid across superseding runs — "re-run failed jobs" doesn't repeat succeeded
-// jobs, so these are kept across suites. Within a suite, the stale-attempt
-// check in filterStaleCheckRuns still overrides this while a newer attempt of
-// the run is executing ("Re-run all jobs" repeats succeeded jobs too).
+// valid across re-run attempts of its own suite — "re-run failed jobs" doesn't
+// repeat succeeded jobs, so these are kept (and pardoned in orphan suites).
+// Two staleness rules in filterStaleCheckRuns still override this: a newer
+// attempt of the run executing ("Re-run all jobs" repeats succeeded jobs too),
+// and a superseding run (new run number — a full fresh execution).
 func isSettledSuccess(run *github.CheckRun) bool {
 	if run.Status == nil || *run.Status != checkRunCompletedStatus || run.Conclusion == nil {
 		return false
@@ -546,19 +547,22 @@ func preferOverExisting(run, existing *github.CheckRun, latestSuiteID int64) boo
 
 // filterStaleCheckRuns removes or converts check runs whose state is stale
 // relative to the workflow-runs listing for this ref. Successful conclusions
-// (success/neutral/skipped) are kept across superseded and orphan suites —
-// "re-run failed jobs" doesn't repeat succeeded jobs, so they stay valid —
+// (success/neutral/skipped) are kept across re-run attempts and orphan suites
+// — "re-run failed jobs" doesn't repeat succeeded jobs, so they stay valid —
 // with one exception: while their own suite is executing a newer re-run
 // attempt, they are as stale as any other conclusion (case 3 below), because
 // "Re-run all jobs" re-executes succeeded jobs too. Three kinds of staleness
 // are handled:
 //
 //  1. Superseded suites: a newer non-cancelled run of the same workflow AND
-//     the same trigger event exists. Superseding run still in progress →
-//     convert to pending (replacement may still produce a result); completed →
-//     drop (job not needed anymore). Runs from different events are never
-//     superseded by each other — `on: [push, pull_request]` legitimately runs
-//     a workflow twice at one SHA and both results count.
+//     the same trigger event exists. A superseding run is a fresh full
+//     execution (unlike a re-run attempt it repeats succeeded jobs), so every
+//     conclusion of the old suite is stale, successes included. Superseding
+//     run still in progress → convert to pending (replacement may still
+//     produce a result); completed → drop (job not needed anymore). Runs from
+//     different events are never superseded by each other — `on: [push,
+//     pull_request]` legitimately runs a workflow twice at one SHA and both
+//     results count.
 //
 //  2. Orphan suites: a github-actions check run whose suite has no workflow run
 //     in the listing. Every Actions check run belongs to a workflow run, so the
@@ -702,11 +706,12 @@ func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults 
 			staleAttempt = true
 		}
 
-		if isSettledSuccess(run) && !staleAttempt {
-			filtered = append(filtered, run)
-			continue
-		}
-
+		// Superseded suites are resolved before the settled-success keep: a
+		// superseding run (new run number) is a full fresh execution that
+		// re-runs succeeded jobs too, so the old suite's successes are exactly
+		// as stale as its failures — the cross-suite analogue of the stale-
+		// attempt rule. ("Re-run failed jobs" never creates a new suite; the
+		// keep below still protects its surviving successes.)
 		if supersedingStatus, isSuperseded := supersededSuites[suiteID]; isSuperseded {
 			if supersedingStatus != checkRunCompletedStatus {
 				// Superseding run is still in progress — convert to pending.
@@ -718,6 +723,11 @@ func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults 
 				sv.debugf("merge-gatekeeper [debug] job=%s: dropped from superseded suite %d (superseding run completed)\n",
 					name, suiteID)
 			}
+			continue
+		}
+
+		if isSettledSuccess(run) && !staleAttempt {
+			filtered = append(filtered, run)
 			continue
 		}
 

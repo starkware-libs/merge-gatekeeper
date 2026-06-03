@@ -1386,9 +1386,13 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 				},
 			}
 		}(),
-		"superseded suite: success checks from old suite kept (re-run failed jobs)": func() test {
-			// Old run (suite 100): build=success, test=failure. Re-run (suite 200): test=in-progress.
-			// build=success from old suite should be kept (not re-run in new attempt).
+		"superseded suite: old-suite success pending while superseding run executes": func() test {
+			// Old run (suite 100): build=success, test=failure. Superseding run
+			// (suite 200, a fresh full execution — distinct suites belong to
+			// distinct run numbers; re-run attempts reuse their suite): only
+			// test has materialized so far, in-progress. build WILL re-run in
+			// the new suite, so its old success is converted to pending until
+			// the superseding run produces (or completes without) a fresh result.
 			c := &mock.Client{
 				GetCombinedStatusFunc: func(ctx context.Context, owner, repo, ref string, opts *github.ListOptions) (*github.CombinedStatus, *github.Response, error) {
 					return &github.CombinedStatus{}, nil, nil
@@ -1426,7 +1430,7 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 						TotalCount: &total,
 						WorkflowRuns: []*github.WorkflowRun{
 							{ID: int64Ptr(10), WorkflowID: &wfID, RunNumber: intPtr(1), RunAttempt: intPtr(1), CheckSuiteID: int64Ptr(100), Status: stringPtr("completed"), Conclusion: stringPtr("failure")},
-							{ID: int64Ptr(11), WorkflowID: &wfID, RunNumber: intPtr(1), RunAttempt: intPtr(2), CheckSuiteID: int64Ptr(200), Status: stringPtr("in_progress")},
+							{ID: int64Ptr(11), WorkflowID: &wfID, RunNumber: intPtr(2), RunAttempt: intPtr(1), CheckSuiteID: int64Ptr(200), Status: stringPtr("in_progress")},
 						},
 					}, nil, nil
 				},
@@ -1441,7 +1445,7 @@ func Test_statusValidator_listStatuses(t *testing.T) {
 				},
 				wantErr: false,
 				want: []*ghaStatus{
-					{Job: "build", State: successState}, // kept from superseded suite (success)
+					{Job: "build", State: pendingState}, // stale success from superseded suite — awaiting its re-execution
 					{Job: "test", State: pendingState},  // dedup picks suite 200 (in-progress)
 				},
 			}
