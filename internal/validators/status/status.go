@@ -88,25 +88,31 @@ func (s *status) IsSuccess() bool {
 }
 
 func (s *status) getIncompleteJobs() []string {
-	done := make(map[string]struct{}, len(s.completeJobs)+len(s.failedJobs)+len(s.cancelledJobs)+len(s.ignoredJobs))
+	// Subtract as a multiset, not a set: totalJobs can legitimately hold the
+	// same display name twice (one workflow's job run by two trigger events
+	// at the same SHA), and a set lookup would let one completed copy swallow
+	// the other, still-pending copy from the incomplete list.
+	done := make(map[string]int, len(s.completeJobs)+len(s.failedJobs)+len(s.cancelledJobs)+len(s.ignoredJobs))
 	for _, j := range s.completeJobs {
-		done[j] = struct{}{}
+		done[j]++
 	}
 	for _, j := range s.failedJobs {
-		done[j] = struct{}{}
+		done[j]++
 	}
 	for _, j := range s.cancelledJobs {
-		done[j] = struct{}{}
+		done[j]++
 	}
 	for _, j := range s.ignoredJobs {
-		done[j] = struct{}{}
+		done[j]++
 	}
 
 	var incomplete []string
 	for _, job := range s.totalJobs {
-		if _, ok := done[job]; !ok {
-			incomplete = append(incomplete, job)
+		if done[job] > 0 {
+			done[job]--
+			continue
 		}
+		incomplete = append(incomplete, job)
 	}
 	return incomplete
 }
