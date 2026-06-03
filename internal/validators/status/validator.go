@@ -402,8 +402,10 @@ func statusOf(run *github.CheckRun) string {
 }
 
 // isSettledSuccess reports whether the check run holds a conclusion that stays
-// valid across re-runs and superseding runs — re-runs don't repeat succeeded
-// jobs, so these are kept regardless of suite staleness ("re-run failed jobs").
+// valid across superseding runs — "re-run failed jobs" doesn't repeat succeeded
+// jobs, so these are kept across suites. Within a suite, the stale-attempt
+// check in filterStaleCheckRuns still overrides this while a newer attempt of
+// the run is executing ("Re-run all jobs" repeats succeeded jobs too).
 func isSettledSuccess(run *github.CheckRun) bool {
 	if run.Status == nil || *run.Status != checkRunCompletedStatus || run.Conclusion == nil {
 		return false
@@ -474,9 +476,12 @@ func preferOverExisting(run, existing *github.CheckRun, latestSuiteID int64) boo
 
 // filterStaleCheckRuns removes or converts check runs whose state is stale
 // relative to the workflow-runs listing for this ref. Successful conclusions
-// (success/neutral/skipped) are always kept — re-runs don't repeat succeeded
-// jobs, so they stay valid ("re-run failed jobs"). Three kinds of staleness
-// are handled for the rest:
+// (success/neutral/skipped) are kept across superseded and orphan suites —
+// "re-run failed jobs" doesn't repeat succeeded jobs, so they stay valid —
+// with one exception: while their own suite is executing a newer re-run
+// attempt, they are as stale as any other conclusion (case 3 below), because
+// "Re-run all jobs" re-executes succeeded jobs too. Three kinds of staleness
+// are handled:
 //
 //  1. Superseded suites: a newer non-cancelled run of the same workflow exists.
 //     Superseding run still in progress → convert to pending (replacement may
@@ -492,8 +497,10 @@ func preferOverExisting(run, existing *github.CheckRun, latestSuiteID int64) boo
 //     jobs" the previous attempt's failures stay visible until the new attempt
 //     recreates each check run (sequencer PR #14106). While the latest run is
 //     executing attempt > 1, conclusions older than the attempt's start are
-//     converted to pending. Once the run completes, surviving old conclusions
-//     are final — their jobs were not part of the re-run.
+//     converted to pending — successes included, since "Re-run all jobs"
+//     re-executes succeeded jobs and their stale successes would otherwise
+//     green-light the gatekeeper mid-re-run. Once the run completes, surviving
+//     old conclusions are final — their jobs were not part of the re-run.
 //
 // Also returns the refWorkflowState used for these decisions, for callers that
 // need to disambiguate same-name jobs across workflows or prefer the latest
@@ -613,7 +620,18 @@ func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults 
 			name = *run.Name
 		}
 
-		if isSettledSuccess(run) {
+		// Stale attempt: the conclusion predates the in-progress re-run attempt
+		// of its own suite — the attempt may be about to replace it. Computed
+		// before the settled-success keep because it trumps it: "Re-run all
+		// jobs" re-executes succeeded jobs, so until the attempt completes a
+		// conclusion older than the attempt's start proves nothing.
+		staleAttempt := false
+		if latest, ok := state.latestRunBySuite[suiteID]; ok &&
+			isStaleAttemptConclusion(run, latest) && latest.status != checkRunCompletedStatus {
+			staleAttempt = true
+		}
+
+		if isSettledSuccess(run) && !staleAttempt {
 			filtered = append(filtered, run)
 			continue
 		}
@@ -645,12 +663,9 @@ func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults 
 			continue
 		}
 
-		// Stale attempt: the conclusion predates the in-progress re-run attempt
-		// of its own suite — the attempt may be about to replace it.
-		if latest, ok := state.latestRunBySuite[suiteID]; ok &&
-			isStaleAttemptConclusion(run, latest) && latest.status != checkRunCompletedStatus {
+		if staleAttempt {
 			sv.debugf("merge-gatekeeper [debug] job=%s: converted to pending (conclusion predates attempt %d of suite %d)\n",
-				name, latest.runAttempt, suiteID)
+				name, state.latestRunBySuite[suiteID].runAttempt, suiteID)
 			filtered = append(filtered, convertToPending(run))
 			continue
 		}
