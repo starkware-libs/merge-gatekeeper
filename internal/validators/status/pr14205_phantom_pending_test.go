@@ -32,6 +32,13 @@ import (
 // Post-fix expectation: when instances of the same (workflow, name) span
 // multiple suites, the suite of the workflow's latest non-cancelled run wins,
 // so the real success is tracked and the gatekeeper turns green.
+//
+// The mock includes the gatekeeper's own in-progress check run (job
+// 77889641552) in the surviving suite, as on the real PR: run A is
+// in_progress precisely because the gatekeeper job inside it is still
+// executing, so its live check run is part of the listing. Without it the
+// partial-materialization placeholder would (correctly) hold the gate for a
+// run that claims to be executing invisible jobs.
 func Test_PR14205_CancelledDuplicateRunPhantomPending(t *testing.T) {
 	survivingSuite := int64(70818287230)
 	cancelledSuite := int64(70818289560) // higher suite ID, created 1s later
@@ -58,6 +65,13 @@ func Test_PR14205_CancelledDuplicateRunPhantomPending(t *testing.T) {
 						Status:     stringPtr(checkRunCompletedStatus),
 						Conclusion: stringPtr(checkRunCancelledConclusion),
 						CheckSuite: &github.CheckSuite{ID: &cancelledSuite},
+					},
+					{
+						// The gatekeeper job itself, polling inside run A.
+						ID:         int64Ptr(77889641552),
+						Name:       stringPtr("self-job"),
+						Status:     stringPtr("in_progress"),
+						CheckSuite: &github.CheckSuite{ID: &survivingSuite},
 					},
 				},
 			}, nil, nil
@@ -108,6 +122,7 @@ func Test_PR14205_CancelledDuplicateRunPhantomPending(t *testing.T) {
 
 	want := []*ghaStatus{
 		{Job: "commitlint", State: successState},
+		{Job: "self-job", State: pendingState},
 	}
 	sort.Slice(got, func(i, j int) bool { return got[i].Job < got[j].Job })
 	if !reflect.DeepEqual(got, want) {

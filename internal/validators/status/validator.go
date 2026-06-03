@@ -789,14 +789,33 @@ func (sv *statusValidator) filterStaleCheckRuns(runResults []*github.CheckRun, w
 			suitesWithCheckRuns[id] = struct{}{}
 		}
 	}
+	// Suites that hold the gate open on their own: at least one check run is
+	// non-terminal after the staleness filtering above (pending conversions
+	// included). A NON-completed run whose suite has only terminal check runs
+	// is the partial sibling of the zero-check-runs case — a fast first job
+	// concluded while the remaining jobs' check runs have not materialized in
+	// the listing yet — and the run-level status proves the suite isn't done,
+	// so it needs a placeholder just the same.
+	suitesWithLiveCheckRuns := make(map[int64]struct{}, len(filtered))
+	for _, run := range filtered {
+		if run.Status == nil || *run.Status == checkRunCompletedStatus {
+			continue
+		}
+		if id := suiteIDOf(run); id != 0 {
+			suitesWithLiveCheckRuns[id] = struct{}{}
+		}
+	}
 	for _, wr := range workflowRuns {
 		if wr.CheckSuiteID == nil || wr.Status == nil {
 			continue
 		}
-		if _, ok := suitesWithCheckRuns[*wr.CheckSuiteID]; ok {
+		if _, superseded := supersededSuites[*wr.CheckSuiteID]; superseded {
 			continue
 		}
-		if _, superseded := supersededSuites[*wr.CheckSuiteID]; superseded {
+		_, hasCheckRuns := suitesWithCheckRuns[*wr.CheckSuiteID]
+		if *wr.Status == checkRunCompletedStatus && hasCheckRuns {
+			// Completed run with materialized check runs — those carry the
+			// signal; nothing to synthesize.
 			continue
 		}
 		workflowName := ""
@@ -836,6 +855,27 @@ func (sv *statusValidator) filterStaleCheckRuns(runResults []*github.CheckRun, w
 					CheckSuite: &github.CheckSuite{ID: wr.CheckSuiteID},
 				})
 			}
+			continue
+		}
+		if _, live := suitesWithLiveCheckRuns[*wr.CheckSuiteID]; live {
+			// The suite's own pending check runs already hold the gate open.
+			continue
+		}
+		if hasCheckRuns {
+			// Partial materialization: the run is still executing but every
+			// materialized check run of its suite is terminal — the remaining
+			// jobs' check runs are not in the listing yet. Without a
+			// placeholder the concluded subset would green-light the gate
+			// mid-run. Square brackets on purpose, as above.
+			placeholderName := fmt.Sprintf("%s [run in progress]", workflowName)
+			pendingStatus := "queued"
+			sv.debugf("merge-gatekeeper [debug] suite %d (workflow %q, run status %s) has only concluded check runs while the run is live: tracking placeholder %q\n",
+				*wr.CheckSuiteID, workflowName, *wr.Status, placeholderName)
+			filtered = append(filtered, &github.CheckRun{
+				Name:       &placeholderName,
+				Status:     &pendingStatus,
+				CheckSuite: &github.CheckSuite{ID: wr.CheckSuiteID},
+			})
 			continue
 		}
 		placeholderName := fmt.Sprintf("%s [workflow starting]", workflowName)
