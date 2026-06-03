@@ -151,6 +151,14 @@ func validate(ctx context.Context, v validators.Validator, logger logger) (bool,
 
 	st, err := v.Validate(ctx)
 	if err != nil {
+		// Infrastructure hiccups (GitHub API failures) must not turn the
+		// gatekeeper red while it still has timeout budget — warn and let the
+		// loop poll again. Real validation outcomes (failed/cancelled jobs,
+		// invalid configuration) abort immediately as before.
+		if validators.IsTransient(err) {
+			logger.PrintErrf("  WARNING: transient GitHub API error, will retry on the next poll: %v\n", err)
+			return false, nil
+		}
 		return false, fmt.Errorf("validation failed: %w", err)
 	}
 

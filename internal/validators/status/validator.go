@@ -181,7 +181,7 @@ func (sv *statusValidator) getCombinedStatus(ctx context.Context) ([]*github.Rep
 	for {
 		c, _, err := sv.client.GetCombinedStatus(ctx, sv.owner, sv.repo, sv.ref, &github.ListOptions{PerPage: maxStatusesPerPage, Page: page})
 		if err != nil {
-			return nil, err
+			return nil, &validators.TransientError{Err: err}
 		}
 		// Guard against an inconsistent listing (total_count above the number
 		// of items actually returned): an empty page ends pagination, as in
@@ -212,7 +212,7 @@ func (sv *statusValidator) listCheckRunsForRef(ctx context.Context) ([]*github.C
 			Filter: &filterAll,
 		})
 		if err != nil {
-			return nil, err
+			return nil, &validators.TransientError{Err: err}
 		}
 		// Empty page ends pagination — see the matching guard in
 		// getCombinedStatus and listWorkflowRunsForRef.
@@ -239,7 +239,7 @@ func (sv *statusValidator) listWorkflowRunsForRef(ctx context.Context) ([]*githu
 			ListOptions: github.ListOptions{Page: page, PerPage: maxWorkflowRunsPerPage},
 		})
 		if err != nil {
-			return nil, err
+			return nil, &validators.TransientError{Err: err}
 		}
 		if len(wr.WorkflowRuns) == 0 {
 			break
@@ -271,7 +271,7 @@ func (sv *statusValidator) listAllWorkflowJobs(ctx context.Context, runID int64,
 			},
 		})
 		if err != nil {
-			return nil, err
+			return nil, &validators.TransientError{Err: err}
 		}
 		if result == nil || len(result.Jobs) == 0 {
 			break
