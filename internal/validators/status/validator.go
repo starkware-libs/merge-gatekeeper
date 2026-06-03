@@ -930,6 +930,14 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		run := latestRunByKey[key]
 		displayName := displayNames[key]
 
+		// Register raw and display names up front so a combined-status entry
+		// matching either form is recognized as already-covered by a check
+		// run — including names this loop goes on to drop (skipped jobs,
+		// stuck matrix parents). A check run for the name exists either way,
+		// and a stale same-name commit status must not resurrect it.
+		currentJobs[key.name] = struct{}{}
+		currentJobs[displayName] = struct{}{}
+
 		statusStr := ""
 		if run.Status != nil {
 			statusStr = *run.Status
@@ -976,10 +984,6 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 			continue
 		}
 
-		// Track both raw and display names so a combined-status entry matching
-		// either form is recognized as already-covered by a check run.
-		currentJobs[key.name] = struct{}{}
-		currentJobs[displayName] = struct{}{}
 		ghaStatuses = append(ghaStatuses, ghaStatus)
 	}
 
