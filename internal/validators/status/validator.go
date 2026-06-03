@@ -827,17 +827,20 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	ghaStatuses := make([]*ghaStatus, 0, len(latestRunByKey)+len(combined))
 	currentJobs := make(map[string]struct{})
 
-	// Detect matrix parents: if name is "X" and there is another job starting with "X (",
-	// then "X" is a matrix parent. GitHub Actions often leaves matrix parent check runs as
-	// cancelled/stuck when a workflow is cancelled, while new workflow runs only report the
-	// matrix children. Tracking the parent would block forever. We match on raw names so
-	// the heuristic still works after collision-disambiguation: a parent and its children
-	// belong to the same workflow and so disambiguate together.
-	isMatrixParent := make(map[string]bool)
+	// Detect matrix parents: if name is "X" and the SAME workflow has another
+	// job starting with "X (", then "X" is a matrix parent. GitHub Actions often
+	// leaves matrix parent check runs as cancelled/stuck when a workflow is
+	// cancelled, while new workflow runs only report the matrix children.
+	// Tracking the parent would block forever. We compare raw names but only
+	// within one workflow: a parent and its children always belong to the same
+	// workflow, and an unrelated workflow's "X (...)" jobs must not swallow a
+	// real job named "X" elsewhere — dropping it while pending would
+	// green-light the gatekeeper with that job still running.
+	isMatrixParent := make(map[workflowJobKey]bool)
 	for _, key := range keys {
 		for _, otherKey := range keys {
-			if key.name != otherKey.name && strings.HasPrefix(otherKey.name, key.name+" (") {
-				isMatrixParent[key.name] = true
+			if key.workflowID == otherKey.workflowID && key.name != otherKey.name && strings.HasPrefix(otherKey.name, key.name+" (") {
+				isMatrixParent[key] = true
 				break
 			}
 		}
@@ -888,7 +891,7 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		// If a detected "parent" has a terminal result (success/failure/error), let it through —
 		// it's either redundant with its children (true matrix parent, harmless) or a
 		// falsely-detected "parent" whose signal we must preserve.
-		if isMatrixParent[key.name] && (ghaStatus.State == pendingState || ghaStatus.State == cancelledState) {
+		if isMatrixParent[key] && (ghaStatus.State == pendingState || ghaStatus.State == cancelledState) {
 			sv.debugf("merge-gatekeeper [debug] job=%s is a matrix parent in %s state, ignoring it\n", displayName, ghaStatus.State)
 			continue
 		}
