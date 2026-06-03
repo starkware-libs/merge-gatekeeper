@@ -903,7 +903,11 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	runCountByKey := make(map[workflowJobKey]int)
 	for _, run := range runResults {
 		if run.Name == nil || run.Status == nil {
-			return nil, fmt.Errorf("%w name: %v, status: %v", ErrInvalidCheckRunResponse, run.Name, run.Status)
+			// A listing item the gatekeeper cannot interpret is an
+			// infrastructure failure, not a CI result — retry on the next
+			// poll like any other API hiccup.
+			return nil, &validators.TransientError{Err: fmt.Errorf(
+				"%w name: %q, status: %q", ErrInvalidCheckRunResponse, run.GetName(), run.GetStatus())}
 		}
 		name := *run.Name
 		info := workflowInfoFor(run)
@@ -1088,7 +1092,9 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	// just prevents a combined status from overriding a check run for the same context name.
 	for _, s := range combined {
 		if s.Context == nil || s.State == nil {
-			return nil, fmt.Errorf("%w context: %v, status: %v", ErrInvalidCombinedStatusResponse, s.Context, s.State)
+			// Same as the check-run shape above: malformed listing → transient.
+			return nil, &validators.TransientError{Err: fmt.Errorf(
+				"%w context: %q, state: %q", ErrInvalidCombinedStatusResponse, s.GetContext(), s.GetState())}
 		}
 		if _, ok := currentJobs[*s.Context]; ok {
 			sv.debugf("merge-gatekeeper [debug] skipped combined_status context=%s (using check run instead)\n", *s.Context)
