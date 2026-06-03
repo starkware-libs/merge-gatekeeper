@@ -379,14 +379,23 @@ func (sv *statusValidator) detectDuplicateNamedJobs(ctx context.Context) error {
 			nameCount[*job.Name]++
 		}
 		for name, count := range nameCount {
-			if count > 1 {
-				return fmt.Errorf(
-					"workflow %q defines %d jobs with the display name %q in a single run; "+
-						"the gatekeeper cannot reliably distinguish same-workflow same-name jobs "+
-						"from re-runs of one job. Rename the duplicates in the workflow YAML so "+
-						"each job has a unique name.",
-					pr.workflowName, count, name)
+			if count <= 1 {
+				continue
 			}
+			// Config-excluded jobs are never tracked, so the same-name
+			// ambiguity is harmless for them — --ignored is the documented
+			// escape hatch when renaming isn't possible right away.
+			if sv.isConfigExcludedName(name) {
+				sv.debugf("merge-gatekeeper [debug] duplicate-named-jobs check: %q duplicated in workflow %q but config-excluded, skipping\n",
+					name, pr.workflowName)
+				continue
+			}
+			return fmt.Errorf(
+				"workflow %q defines %d jobs with the display name %q in a single run; "+
+					"the gatekeeper cannot reliably distinguish same-workflow same-name jobs "+
+					"from re-runs of one job. Rename the duplicates in the workflow YAML so "+
+					"each job has a unique name, or exclude the name via --ignored.",
+				pr.workflowName, count, name)
 		}
 		sv.debugf("merge-gatekeeper [debug] duplicate-named-jobs check passed for workflow %q (%d jobs)\n",
 			pr.workflowName, len(jobs))
