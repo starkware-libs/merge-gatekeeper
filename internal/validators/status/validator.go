@@ -763,7 +763,7 @@ func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults 
 		}
 	}
 	for _, wr := range workflowRuns {
-		if wr.CheckSuiteID == nil || wr.Status == nil || *wr.Status == checkRunCompletedStatus {
+		if wr.CheckSuiteID == nil || wr.Status == nil {
 			continue
 		}
 		if _, ok := suitesWithCheckRuns[*wr.CheckSuiteID]; ok {
@@ -779,8 +779,35 @@ func (sv *statusValidator) filterStaleCheckRuns(ctx context.Context, runResults 
 		if workflowName == "" {
 			workflowName = fmt.Sprintf("workflow:%d", state.suiteToWorkflow[*wr.CheckSuiteID].workflowID)
 		}
-		// Square brackets on purpose: a "Name (...)" placeholder would trip the
-		// matrix-parent heuristic for a real job named like the workflow.
+		if *wr.Status == checkRunCompletedStatus {
+			// Terminal sibling of the queued-run case: a run that failed
+			// before creating any job — most commonly startup_failure from a
+			// workflow-file error introduced at this SHA — is red in the UI
+			// but invisible via check runs. Track it as a failure; other
+			// empty completed runs (success, cancelled, skipped) stay
+			// invisible as before.
+			conclusion := ""
+			if wr.Conclusion != nil {
+				conclusion = *wr.Conclusion
+			}
+			switch conclusion {
+			case "failure", "startup_failure", "timed_out":
+				// Square brackets on purpose: a "Name (...)" placeholder would
+				// trip the matrix-parent heuristic for a job named like the workflow.
+				placeholderName := fmt.Sprintf("%s [run %s]", workflowName, conclusion)
+				completedStatus := checkRunCompletedStatus
+				failureConclusion := "failure"
+				sv.debugf("merge-gatekeeper [debug] suite %d (workflow %q) completed %s with no check runs: tracking failure %q\n",
+					*wr.CheckSuiteID, workflowName, conclusion, placeholderName)
+				filtered = append(filtered, &github.CheckRun{
+					Name:       &placeholderName,
+					Status:     &completedStatus,
+					Conclusion: &failureConclusion,
+					CheckSuite: &github.CheckSuite{ID: wr.CheckSuiteID},
+				})
+			}
+			continue
+		}
 		placeholderName := fmt.Sprintf("%s [workflow starting]", workflowName)
 		pendingStatus := "queued"
 		sv.debugf("merge-gatekeeper [debug] suite %d (workflow %q, run status %s) has no check runs yet: tracking placeholder %q\n",
