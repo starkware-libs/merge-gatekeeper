@@ -64,6 +64,13 @@ type statusValidator struct {
 	// jobs yet are NOT memoized — a vacuous pass proves nothing, and the
 	// guard must re-inspect them once their jobs appear.
 	dupVerifiedWorkflows map[int64]bool
+
+	// currentJobNamesByWorkflow records, per workflow ID, the display names of
+	// the jobs listed from that workflow's latest materialized run (fetched by
+	// detectDuplicateNamedJobs anyway). A name present here is a real, current
+	// YAML job — the matrix-parent heuristic must not swallow it just because
+	// "name (...)" siblings exist in the same workflow.
+	currentJobNamesByWorkflow map[int64]map[string]struct{}
 }
 
 func CreateValidator(c github.Client, opts ...Option) (validators.Validator, error) {
@@ -385,12 +392,20 @@ func (sv *statusValidator) detectDuplicateNamedJobs(ctx context.Context, workflo
 			continue
 		}
 		nameCount := make(map[string]int)
+		jobNames := make(map[string]struct{}, len(jobs))
 		for _, job := range jobs {
 			if job.Name == nil {
 				continue
 			}
 			nameCount[*job.Name]++
+			jobNames[*job.Name] = struct{}{}
 		}
+		// Cache the workflow's current job names for the matrix-parent
+		// heuristic, which must not drop a name that is a real current job.
+		if sv.currentJobNamesByWorkflow == nil {
+			sv.currentJobNamesByWorkflow = make(map[int64]map[string]struct{})
+		}
+		sv.currentJobNamesByWorkflow[wid] = jobNames
 		for name, count := range nameCount {
 			if count <= 1 {
 				continue
@@ -850,6 +865,19 @@ func (sv *statusValidator) isConfigExcludedName(name string) bool {
 	return false
 }
 
+// isCurrentJobName reports whether name is a current job of the workflow's
+// latest materialized run, per the jobs listing cached by
+// detectDuplicateNamedJobs. False when no jobs were listed for the workflow
+// yet — callers fall back to their heuristics in that case.
+func (sv *statusValidator) isCurrentJobName(workflowID int64, name string) bool {
+	names, ok := sv.currentJobNamesByWorkflow[workflowID]
+	if !ok {
+		return false
+	}
+	_, ok = names[name]
+	return ok
+}
+
 func (sv *statusValidator) debugf(format string, args ...interface{}) {
 	if sv.debugLog != nil {
 		sv.debugLog(format, args...)
@@ -1038,6 +1066,15 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	// green-light the gatekeeper with that job still running.
 	isMatrixParent := make(map[workflowJobKey]bool)
 	for _, key := range keys {
+		// A name listed as a current job of the workflow's latest
+		// materialized run is a real YAML job (e.g. a standalone "build"
+		// next to a matrix "build (...)"), never a stuck leftover parent —
+		// dropping it while pending would green-light the gatekeeper with
+		// the job still running, and dropping it when cancelled would hide
+		// a cancellation that must gate red.
+		if sv.isCurrentJobName(key.workflowID, key.name) {
+			continue
+		}
 		for _, otherKey := range keys {
 			if key.workflowID == otherKey.workflowID && key.event == otherKey.event &&
 				key.appID == otherKey.appID &&
