@@ -813,6 +813,7 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	type workflowJobKey struct {
 		workflowID int64
 		event      string
+		appID      int64 // set only when no workflow owns the suite (third-party check apps)
 		name       string
 	}
 	latestRunByKey := make(map[workflowJobKey]*github.CheckRun)
@@ -824,6 +825,14 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		name := *run.Name
 		info := workflowInfoFor(run)
 		key := workflowJobKey{workflowID: info.workflowID, event: info.event, name: name}
+		if info.workflowID == 0 {
+			// No owning workflow run (third-party check app, or a suite the
+			// listing doesn't know): scope by the posting app, so two apps
+			// publishing the same check name stay independent — the same
+			// masking class as PR starkware-libs/sequencer#13859, but across
+			// check apps instead of workflows.
+			key.appID = run.GetApp().GetID()
+		}
 		runCountByKey[key]++
 		existing, ok := latestRunByKey[key]
 		if !ok {
@@ -870,7 +879,10 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		if keys[i].workflowID != keys[j].workflowID {
 			return keys[i].workflowID < keys[j].workflowID
 		}
-		return keys[i].event < keys[j].event
+		if keys[i].event != keys[j].event {
+			return keys[i].event < keys[j].event
+		}
+		return keys[i].appID < keys[j].appID
 	})
 
 	displayNames := make(map[workflowJobKey]string, len(keys))
@@ -919,6 +931,7 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 	for _, key := range keys {
 		for _, otherKey := range keys {
 			if key.workflowID == otherKey.workflowID && key.event == otherKey.event &&
+				key.appID == otherKey.appID &&
 				key.name != otherKey.name && strings.HasPrefix(otherKey.name, key.name+" (") {
 				isMatrixParent[key] = true
 				break
