@@ -320,14 +320,18 @@ func (sv *statusValidator) listAllWorkflowJobs(ctx context.Context, runID int64,
 // exactly when the duplicate jobs are about to appear. If any API call fails,
 // we propagate the error and rely on the caller to retry on the next poll.
 func (sv *statusValidator) detectDuplicateNamedJobs(ctx context.Context, workflowRuns []*github.WorkflowRun) error {
-	// Pick one run per workflow_id. Any run for this SHA shares the same YAML,
-	// so we just take the highest run_number to get the most recent metadata.
-	type pickedRun struct {
+	// Collect every run per workflow_id, newest first. Any run for this SHA
+	// shares the same YAML, so the first run with materialized jobs is
+	// authoritative. Inspecting only the newest run would blind the guard
+	// whenever that run never materializes jobs (cancelled while queued):
+	// it passes vacuously on every poll while an OLDER run's live check
+	// runs carry the duplicate names the dedup then silently collapses.
+	type candidateRun struct {
 		runID        int64
 		workflowName string
 		runNumber    int
 	}
-	perWorkflow := make(map[int64]pickedRun)
+	perWorkflow := make(map[int64][]candidateRun)
 	for _, wr := range workflowRuns {
 		if wr.WorkflowID == nil || wr.ID == nil {
 			continue
@@ -340,33 +344,44 @@ func (sv *statusValidator) detectDuplicateNamedJobs(ctx context.Context, workflo
 		if wr.RunNumber != nil {
 			runNumber = *wr.RunNumber
 		}
-		if existing, ok := perWorkflow[wid]; ok && runNumber <= existing.runNumber {
-			continue
-		}
 		workflowName := ""
 		if wr.Name != nil {
 			workflowName = *wr.Name
 		}
-		perWorkflow[wid] = pickedRun{
+		perWorkflow[wid] = append(perWorkflow[wid], candidateRun{
 			runID:        *wr.ID,
 			workflowName: workflowName,
 			runNumber:    runNumber,
-		}
+		})
 	}
 
-	for wid, pr := range perWorkflow {
-		jobs, err := sv.listAllWorkflowJobs(ctx, pr.runID, "latest")
-		if err != nil {
-			return fmt.Errorf(
-				"duplicate-named-jobs check: failed to list jobs for workflow %q (run %d): %w",
-				pr.workflowName, pr.runID, err)
+	for wid, candidates := range perWorkflow {
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].runNumber > candidates[j].runNumber
+		})
+		var pr candidateRun
+		var jobs []*github.WorkflowJob
+		for _, candidate := range candidates {
+			candidateJobs, err := sv.listAllWorkflowJobs(ctx, candidate.runID, "latest")
+			if err != nil {
+				return fmt.Errorf(
+					"duplicate-named-jobs check: failed to list jobs for workflow %q (run %d): %w",
+					candidate.workflowName, candidate.runID, err)
+			}
+			if len(candidateJobs) != 0 {
+				pr, jobs = candidate, candidateJobs
+				break
+			}
+			sv.debugf("merge-gatekeeper [debug] duplicate-named-jobs check: workflow %q run %d has no jobs, trying an older run\n",
+				candidate.workflowName, candidate.runID)
 		}
 		if len(jobs) == 0 {
-			// Nothing materialized yet — a vacuous pass. Leave the workflow
-			// unverified so the next poll inspects it again. (No jobs also
-			// means no check runs from it to mask, so not failing is safe.)
+			// No run of this workflow has materialized jobs yet — a vacuous
+			// pass. Leave the workflow unverified so the next poll inspects
+			// it again. (No jobs also means no check runs from it to mask,
+			// so not failing is safe.)
 			sv.debugf("merge-gatekeeper [debug] duplicate-named-jobs check: workflow %q has no jobs yet, will re-check\n",
-				pr.workflowName)
+				candidates[0].workflowName)
 			continue
 		}
 		nameCount := make(map[string]int)
