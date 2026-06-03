@@ -949,6 +949,7 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		workflowID int64
 		event      string
 		appID      int64 // set only when no workflow owns the suite (third-party check apps)
+		suiteID    int64 // set only for github-actions runs whose suite has no workflow in the listing
 		name       string
 	}
 	latestRunByKey := make(map[workflowJobKey]*github.CheckRun)
@@ -965,12 +966,27 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		info := workflowInfoFor(run)
 		key := workflowJobKey{workflowID: info.workflowID, event: info.event, name: name}
 		if info.workflowID == 0 {
-			// No owning workflow run (third-party check app, or a suite the
-			// listing doesn't know): scope by the posting app, so two apps
-			// publishing the same check name stay independent — the same
-			// masking class as PR starkware-libs/sequencer#13859, but across
-			// check apps instead of workflows.
-			key.appID = run.GetApp().GetID()
+			if isGitHubActionsCheckRun(run) {
+				// A github-actions check run whose suite the listing doesn't
+				// know means the listing is inconsistent (every Actions check
+				// run belongs to a workflow run — same axiom as the orphan
+				// rule). Keying such runs by app would collapse same-named
+				// runs from DIFFERENT unknown suites, letting one suite's
+				// settled success mask another suite's unresolved/failed run
+				// (the PR#13859 masking class, inside the PR#14205 window).
+				// Key by suite instead: distinct unknown suites stay
+				// independently tracked — fail-closed — until a consistent
+				// listing keys them by their real workflows.
+				key.suiteID = suiteIDOf(run)
+			} else {
+				// Third-party check app: scope by the posting app, so two apps
+				// publishing the same check name stay independent — the same
+				// masking class as PR starkware-libs/sequencer#13859, but
+				// across check apps instead of workflows. (Suites must collapse
+				// here: third-party re-runs create new suites and the latest
+				// result must supersede the old one.)
+				key.appID = run.GetApp().GetID()
+			}
 		}
 		runCountByKey[key]++
 		existing, ok := latestRunByKey[key]
@@ -1021,7 +1037,10 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 		if keys[i].event != keys[j].event {
 			return keys[i].event < keys[j].event
 		}
-		return keys[i].appID < keys[j].appID
+		if keys[i].appID != keys[j].appID {
+			return keys[i].appID < keys[j].appID
+		}
+		return keys[i].suiteID < keys[j].suiteID
 	})
 
 	displayNames := make(map[workflowJobKey]string, len(keys))
@@ -1078,8 +1097,12 @@ func (sv *statusValidator) listGhaStatuses(ctx context.Context) ([]*ghaStatus, e
 			continue
 		}
 		for _, otherKey := range keys {
+			// A parent and its matrix children always share a suite, so for
+			// unknown-suite github-actions runs (suiteID set) the children
+			// must come from the SAME suite — an unrelated unknown suite's
+			// "X (...)" jobs must not swallow this suite's "X".
 			if key.workflowID == otherKey.workflowID && key.event == otherKey.event &&
-				key.appID == otherKey.appID &&
+				key.appID == otherKey.appID && key.suiteID == otherKey.suiteID &&
 				key.name != otherKey.name && strings.HasPrefix(otherKey.name, key.name+" (") {
 				isMatrixParent[key] = true
 				break
