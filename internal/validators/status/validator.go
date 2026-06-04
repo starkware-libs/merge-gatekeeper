@@ -816,12 +816,33 @@ func (sv *statusValidator) filterStaleCheckRuns(runResults []*github.CheckRun, w
 	// the listing yet — and the run-level status proves the suite isn't done,
 	// so it needs a placeholder just the same.
 	suitesWithLiveCheckRuns := make(map[int64]struct{}, len(filtered))
+	// Suites whose check runs already carry a blocking signal: live (as above)
+	// or terminal-and-gating (failure/cancelled/completed-without-conclusion).
+	// Used by the completed-run branch below — a failed run whose suite shows
+	// neither a live nor a gating check run has its failing job's check run
+	// missing from the listing, and its non-blocking subset must not stand in
+	// for the whole suite.
+	suitesWithBlockingCheckRuns := make(map[int64]struct{}, len(filtered))
 	for _, run := range filtered {
-		if run.Status == nil || *run.Status == checkRunCompletedStatus {
+		id := suiteIDOf(run)
+		if id == 0 {
 			continue
 		}
-		if id := suiteIDOf(run); id != 0 {
+		if run.Status == nil || *run.Status != checkRunCompletedStatus {
 			suitesWithLiveCheckRuns[id] = struct{}{}
+			suitesWithBlockingCheckRuns[id] = struct{}{}
+			continue
+		}
+		if run.Conclusion == nil {
+			// Completed without a conclusion is tracked as an error — it gates.
+			suitesWithBlockingCheckRuns[id] = struct{}{}
+			continue
+		}
+		switch *run.Conclusion {
+		case checkRunSuccessConclusion, checkRunNeutralConclusion, checkRunSkipConclusion:
+			// Non-blocking: successes count toward green, skipped is dropped.
+		default:
+			suitesWithBlockingCheckRuns[id] = struct{}{}
 		}
 	}
 	for _, wr := range workflowRuns {
@@ -833,9 +854,15 @@ func (sv *statusValidator) filterStaleCheckRuns(runResults []*github.CheckRun, w
 		}
 		_, hasCheckRuns := suitesWithCheckRuns[*wr.CheckSuiteID]
 		if *wr.Status == checkRunCompletedStatus && hasCheckRuns {
-			// Completed run with materialized check runs — those carry the
-			// signal; nothing to synthesize.
-			continue
+			if _, blocking := suitesWithBlockingCheckRuns[*wr.CheckSuiteID]; blocking {
+				// Completed run whose suite has a live or gating check run —
+				// that carries the signal; nothing to synthesize.
+				continue
+			}
+			// Every materialized check run of the suite is non-blocking
+			// (success/neutral/skipped). For a failure-class conclusion that
+			// means the failing job's check run is missing from the listing —
+			// fall through to the conclusion switch below.
 		}
 		workflowName := ""
 		if wr.Name != nil {
@@ -853,7 +880,10 @@ func (sv *statusValidator) filterStaleCheckRuns(runResults []*github.CheckRun, w
 			// CI never ran at all; check runs concluding action_required
 			// already gate red, so the empty-run path must too. Track these
 			// as failures; other empty completed runs (success, cancelled,
-			// skipped) stay invisible as before.
+			// skipped) stay invisible as before. A failure-class run whose
+			// suite HAS check runs but none blocking reaches here too (see
+			// the fall-through above) and is held pending instead — its
+			// failing check run is merely missing from the listing.
 			conclusion := ""
 			if wr.Conclusion != nil {
 				conclusion = *wr.Conclusion
@@ -863,6 +893,24 @@ func (sv *statusValidator) filterStaleCheckRuns(runResults []*github.CheckRun, w
 				// Square brackets on purpose: a "Name (...)" placeholder would
 				// trip the matrix-parent heuristic for a job named like the workflow.
 				placeholderName := fmt.Sprintf("%s [run %s]", workflowName, conclusion)
+				if hasCheckRuns {
+					// Partial materialization, terminal form: the run failed,
+					// but every materialized check run of its suite is
+					// non-blocking — the failing job's check run has not
+					// appeared in the listing yet. Pending, not red: the real
+					// check run materializes on a later poll and decides the
+					// gate — it may even be an --ignored job's failure, which
+					// must not abort the gatekeeper.
+					pendingStatus := "queued"
+					sv.debugf("merge-gatekeeper [debug] suite %d (workflow %q) completed %s but its materialized check runs are all non-blocking: tracking placeholder %q\n",
+						*wr.CheckSuiteID, workflowName, conclusion, placeholderName)
+					filtered = append(filtered, &github.CheckRun{
+						Name:       &placeholderName,
+						Status:     &pendingStatus,
+						CheckSuite: &github.CheckSuite{ID: wr.CheckSuiteID},
+					})
+					continue
+				}
 				completedStatus := checkRunCompletedStatus
 				failureConclusion := "failure"
 				sv.debugf("merge-gatekeeper [debug] suite %d (workflow %q) completed %s with no check runs: tracking failure %q\n",
