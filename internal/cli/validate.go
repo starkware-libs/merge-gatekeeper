@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -25,6 +26,8 @@ var (
 	validateIntervalSeconds uint
 	selfJobName         string
 	ignoredJobs         string
+	confirmPolls        uint
+	emptyGraceSeconds   uint
 )
 
 func validateCmd() *cobra.Command {
@@ -32,6 +35,13 @@ func validateCmd() *cobra.Command {
 		Use:   "validate",
 		Short: "Validate other github actions job",
 		PreRun: func(cmd *cobra.Command, args []string) {
+			// GITHUB_REPOSITORY only fills the gap when --repo is not passed:
+			// inside GitHub Actions the env var is always set, and letting it
+			// override an explicit flag would silently point the gatekeeper at
+			// the wrong repository.
+			if cmd.Flags().Changed("repo") {
+				return
+			}
 			str := os.Getenv("GITHUB_REPOSITORY")
 			if len(str) != 0 {
 				ghRepo = str
@@ -89,6 +99,9 @@ func validateCmd() *cobra.Command {
 
 	cmd.PersistentFlags().StringVarP(&ignoredJobs, "ignored", "i", "", "set ignored jobs (comma-separated list)")
 
+	cmd.PersistentFlags().UintVar(&confirmPolls, "confirm-polls", 3, "consecutive green polls observing the same jobs required before reporting success")
+	cmd.PersistentFlags().UintVar(&emptyGraceSeconds, "empty-grace", 30, "when no jobs are discovered, also wait this many seconds from start before reporting success")
+
 	return cmd
 }
 
@@ -112,52 +125,125 @@ func debug(logger logger, name string) func() {
 }
 
 func doValidateCmd(ctx context.Context, logger logger, vs ...validators.Validator) error {
+	// Reject nonsensical values up front: interval=0 would panic in
+	// time.NewTicker and timeout=0 would die with a bare "context deadline
+	// exceeded" — both one action-input typo away.
+	if validateIntervalSeconds == 0 {
+		return errors.New("invalid configuration: interval must be at least 1 second")
+	}
+	if timeoutSecond == 0 {
+		return errors.New("invalid configuration: timeout must be at least 1 second")
+	}
+	if confirmPolls == 0 {
+		return errors.New("invalid configuration: confirm-polls must be at least 1")
+	}
+	// The success path needs at least (confirmPolls-1) intervals of streak plus
+	// the empty-set grace; a tighter timeout can only ever expire.
+	minBudget := (confirmPolls-1)*validateIntervalSeconds + emptyGraceSeconds
+	if minBudget >= timeoutSecond {
+		return fmt.Errorf(
+			"invalid configuration: confirm-polls=%d at interval=%ds plus empty-grace=%ds needs at least %ds, but timeout is %ds",
+			confirmPolls, validateIntervalSeconds, emptyGraceSeconds, minBudget, timeoutSecond)
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSecond)*time.Second)
 	defer cancel()
 
 	intervalTicker := ticker.NewInstantTicker(time.Duration(validateIntervalSeconds) * time.Second)
 	defer intervalTicker.Stop()
 
+	// Quiescence state: GitHub's listings are eventually consistent, so a
+	// single all-green poll can predate work that simply has not indexed yet
+	// (a run with no check runs, a partially materialized suite, a stale
+	// re-run attempt). Success therefore requires confirmPolls consecutive
+	// green polls that observed the SAME world — fingerprints carry the
+	// resolved head SHA and the gated job set, so a branch advancing mid-run
+	// or CI materializing late resets the streak automatically. Red stays
+	// fail-fast: validation failures abort on the poll that sees them.
+	start := time.Now()
+	var streak uint
+	var lastFingerprint string
+	var haveFingerprint bool
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-intervalTicker.C():
-			var successCnt int
+			allGreen := true
+			totalTracked := 0
+			fingerprints := make([]string, 0, len(vs))
 			for _, v := range vs {
-				ok, err := validate(ctx, v, logger)
+				st, err := validate(ctx, v, logger)
 				if err != nil {
 					return err
 				}
-				if ok {
-					successCnt++
+				// A transient API error yields no status: this poll observed
+				// nothing, so it cannot extend the quiescence streak.
+				if st == nil || !st.IsSuccess() {
+					allGreen = false
+					break
 				}
+				totalTracked += st.TrackedJobs()
+				fingerprints = append(fingerprints, st.Fingerprint())
 			}
-			if successCnt != len(vs) {
+			if !allGreen {
+				streak = 0
+				haveFingerprint = false
 				logger.PrintErrln("")
 				logger.PrintErrln("  WARNING: Validation is yet to be completed. This is most likely due to some other jobs still running.")
 				logger.PrintErrf("           Waiting for %d seconds before retrying.\n\n", validateIntervalSeconds)
 				break
 			}
 
-			logger.Println("All validations were successful!")
-			return nil
+			fingerprint := strings.Join(fingerprints, "\x01")
+			if haveFingerprint && fingerprint == lastFingerprint {
+				streak++
+			} else {
+				streak = 1
+			}
+			lastFingerprint = fingerprint
+			haveFingerprint = true
+
+			// An empty gated set right after the trigger usually means CI has
+			// not materialized into the listings yet — hold the gate for the
+			// grace period before trusting it.
+			graceMet := totalTracked > 0 ||
+				time.Since(start) >= time.Duration(emptyGraceSeconds)*time.Second
+
+			if streak >= confirmPolls && graceMet {
+				logger.Println("All validations were successful!")
+				return nil
+			}
+
+			if !graceMet {
+				logger.PrintErrf("  green poll %d/%d, but no jobs were discovered yet; holding for the %ds empty-set grace (%.0fs elapsed)\n\n",
+					streak, confirmPolls, emptyGraceSeconds, time.Since(start).Seconds())
+			} else {
+				logger.PrintErrf("  green poll %d/%d; confirming the result holds before reporting success\n\n",
+					streak, confirmPolls)
+			}
 		}
 	}
 }
 
-func validate(ctx context.Context, v validators.Validator, logger logger) (bool, error) {
+func validate(ctx context.Context, v validators.Validator, logger logger) (validators.Status, error) {
 	defer debug(logger, "validator: "+v.Name())()
 
 	st, err := v.Validate(ctx)
 	if err != nil {
-		return false, fmt.Errorf("validation failed: %w", err)
+		// Infrastructure hiccups (GitHub API failures) must not turn the
+		// gatekeeper red while it still has timeout budget — warn and let the
+		// loop poll again. Real validation outcomes (failed/cancelled jobs,
+		// invalid configuration) abort immediately as before.
+		if validators.IsTransient(err) {
+			logger.PrintErrf("  WARNING: transient GitHub API error, will retry on the next poll: %v\n", err)
+			return nil, nil
+		}
+		return nil, fmt.Errorf("validation failed: %w", err)
 	}
 
 	logger.Println(st.Detail())
 
-	if !st.IsSuccess() {
-		return false, nil
-	}
-	return true, nil
+	return st, nil
 }

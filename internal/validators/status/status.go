@@ -1,6 +1,9 @@
 package status
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 type status struct {
 	totalJobs     []string
@@ -9,6 +12,11 @@ type status struct {
 	cancelledJobs []string
 	ignoredJobs   []string
 	succeeded     bool
+
+	// resolvedHeadSHA is the commit the listings behind this status were
+	// fetched for. Part of the Fingerprint so the polling loop's quiescence
+	// streak resets when a branch --ref advances mid-run.
+	resolvedHeadSHA string
 }
 
 func prettyPrintJobList(jobs []string) string {
@@ -87,26 +95,48 @@ func (s *status) IsSuccess() bool {
 	return s.succeeded
 }
 
+// Fingerprint identifies the observed world: the resolved head SHA plus the
+// gated job set. totalJobs already excludes self/ignored names (so a
+// still-running ignored job cannot stall the loop's quiescence streak) and is
+// deterministically sorted (ghaStatuses is sorted before Validate consumes
+// it), preserving duplicates — two same-named jobs from two trigger events are
+// a real world delta. NUL separators: job display names can contain commas,
+// spaces and brackets, so any printable join would be collision-prone.
+func (s *status) Fingerprint() string {
+	return s.resolvedHeadSHA + "\x00" + strings.Join(s.totalJobs, "\x00")
+}
+
+// TrackedJobs reports how many gated jobs were observed (self/ignored excluded).
+func (s *status) TrackedJobs() int {
+	return len(s.totalJobs)
+}
+
 func (s *status) getIncompleteJobs() []string {
-	done := make(map[string]struct{}, len(s.completeJobs)+len(s.failedJobs)+len(s.cancelledJobs)+len(s.ignoredJobs))
+	// Subtract as a multiset, not a set: totalJobs can legitimately hold the
+	// same display name twice (one workflow's job run by two trigger events
+	// at the same SHA), and a set lookup would let one completed copy swallow
+	// the other, still-pending copy from the incomplete list.
+	done := make(map[string]int, len(s.completeJobs)+len(s.failedJobs)+len(s.cancelledJobs)+len(s.ignoredJobs))
 	for _, j := range s.completeJobs {
-		done[j] = struct{}{}
+		done[j]++
 	}
 	for _, j := range s.failedJobs {
-		done[j] = struct{}{}
+		done[j]++
 	}
 	for _, j := range s.cancelledJobs {
-		done[j] = struct{}{}
+		done[j]++
 	}
 	for _, j := range s.ignoredJobs {
-		done[j] = struct{}{}
+		done[j]++
 	}
 
 	var incomplete []string
 	for _, job := range s.totalJobs {
-		if _, ok := done[job]; !ok {
-			incomplete = append(incomplete, job)
+		if done[job] > 0 {
+			done[job]--
+			continue
 		}
+		incomplete = append(incomplete, job)
 	}
 	return incomplete
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/go-github/v84/github"
@@ -23,10 +24,12 @@ type (
 )
 
 type (
+	App                  = github.App
 	CheckRun             = github.CheckRun
 	CheckSuite           = github.CheckSuite
 	ListCheckRunsOptions = github.ListCheckRunsOptions
 	ListCheckRunsResults = github.ListCheckRunsResults
+	Timestamp            = github.Timestamp
 )
 
 type (
@@ -43,6 +46,8 @@ type Client interface {
 	ListCheckRunsForRef(ctx context.Context, owner, repo, ref string, opts *ListCheckRunsOptions) (*ListCheckRunsResults, *Response, error)
 	ListRepositoryWorkflowRuns(ctx context.Context, owner, repo string, opts *ListWorkflowRunsOptions) (*WorkflowRuns, *Response, error)
 	ListWorkflowJobs(ctx context.Context, owner, repo string, runID int64, opts *ListWorkflowJobsOptions) (*Jobs, *Response, error)
+	// GetCommitSHA1 resolves any ref (branch, tag, short SHA) to a full commit SHA.
+	GetCommitSHA1(ctx context.Context, owner, repo, ref string) (string, *Response, error)
 }
 
 type client struct {
@@ -83,8 +88,15 @@ func (c *client) ListWorkflowJobs(ctx context.Context, owner, repo string, runID
 	})
 }
 
-// withRetry runs fn and retries on 5xx with exponential backoff. It does not retry on context
-// cancellation or 4xx errors.
+func (c *client) GetCommitSHA1(ctx context.Context, owner, repo, ref string) (string, *Response, error) {
+	return withRetry(ctx, defaultMaxRetries, defaultRetryDelay, func() (string, *Response, error) {
+		return c.ghc.Repositories.GetCommitSHA1(ctx, owner, repo, ref, "")
+	})
+}
+
+// withRetry runs fn and retries on 5xx and rate-limit responses with
+// exponential backoff (or the server-requested Retry-After delay, whichever
+// is longer). It does not retry on context cancellation or other 4xx errors.
 func withRetry[T any](ctx context.Context, maxRetries int, initialDelay time.Duration, fn func() (T, *Response, error)) (T, *Response, error) {
 	var zero T
 	var lastResp *Response
@@ -106,15 +118,19 @@ func withRetry[T any](ctx context.Context, maxRetries int, initialDelay time.Dur
 		if resp == nil {
 			return zero, lastResp, err
 		}
-		// Retry on 5xx and 403 rate-limit responses.
-		isRateLimit := resp.StatusCode == 403 && resp.Header.Get("X-RateLimit-Remaining") == "0"
-		if !isRateLimit && (resp.StatusCode < 500 || resp.StatusCode > 599) {
+		if !isRetryableStatus(resp) {
 			return zero, lastResp, err
 		}
 		if attempt == maxRetries-1 {
 			break
 		}
 		backoff := initialDelay * time.Duration(1<<uint(attempt))
+		// Secondary rate limits announce when to come back; honor it when it
+		// exceeds our own backoff. The select on ctx below still bounds the
+		// wait by the gatekeeper's deadline.
+		if ra := retryAfter(resp); ra > backoff {
+			backoff = ra
+		}
 		select {
 		case <-ctx.Done():
 			return zero, lastResp, ctx.Err()
@@ -123,4 +139,40 @@ func withRetry[T any](ctx context.Context, maxRetries int, initialDelay time.Dur
 		}
 	}
 	return zero, lastResp, lastErr
+}
+
+// isRetryableStatus reports whether the response is a transient condition
+// worth retrying: any 5xx, a primary rate limit (403 with the quota
+// exhausted), or a secondary rate limit (429, or 403 carrying Retry-After
+// while the primary quota is still positive — GitHub returns both shapes for
+// secondary limits, which bursty polling across many gatekeepers triggers).
+func isRetryableStatus(resp *Response) bool {
+	if resp.StatusCode >= 500 && resp.StatusCode <= 599 {
+		return true
+	}
+	if resp.StatusCode == 429 {
+		return true
+	}
+	if resp.StatusCode == 403 {
+		if resp.Header.Get("X-RateLimit-Remaining") == "0" {
+			return true
+		}
+		if resp.Header.Get("Retry-After") != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// retryAfter parses the Retry-After header (0 when absent or unparseable).
+func retryAfter(resp *Response) time.Duration {
+	v := resp.Header.Get("Retry-After")
+	if v == "" {
+		return 0
+	}
+	seconds, err := strconv.Atoi(v)
+	if err != nil || seconds < 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
 }

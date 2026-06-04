@@ -6,6 +6,8 @@ branding:
   # Required permissions: checks: read, statuses: read, actions: read
   # actions: read is needed to detect superseded workflow runs, which prevents
   # false failures when concurrent runs cancel each other.
+  # contents: read is additionally needed when ref is a branch or tag name
+  # (it is resolved to a commit SHA via the commits API).
 inputs:
   token:
     description: "GitHub token (defaults to github.token when omitted; or set GITHUB_TOKEN env)"
@@ -27,6 +29,14 @@ inputs:
     description: "set ignored jobs (comma-separated list)"
     required: false
     default: ""
+  confirm-polls:
+    description: "consecutive green polls observing the same jobs required before reporting success (default 3)"
+    required: false
+    default: "3"
+  empty-grace:
+    description: "when no jobs are discovered, also wait this many seconds before reporting success (default 30)"
+    required: false
+    default: "30"
   ref:
     description: "set ref of github repository. the ref can be a SHA, a branch name, or tag name"
     required: false
@@ -46,4 +56,6 @@ runs:
     - "--ref=${{ inputs.ref }}"
     - "--timeout=${{ inputs.timeout }}"
     - "--ignored=${{ inputs.ignored }}"
+    - "--confirm-polls=${{ inputs.confirm-polls }}"
+    - "--empty-grace=${{ inputs.empty-grace }}"
     - "--debug=${{ inputs.debug }}"
