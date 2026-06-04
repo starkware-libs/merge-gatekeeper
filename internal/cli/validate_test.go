@@ -15,6 +15,12 @@ import (
 func TestMain(m *testing.M) {
 	validateIntervalSeconds = 1
 	timeoutSecond = 2
+	// Neutralize the quiescence layer for the pre-existing tests: one green
+	// poll suffices and the empty-set grace is immediate. The nil-safe mock
+	// Status reports TrackedJobs()==0 (empty set) with a constant fingerprint,
+	// so without these the loop would apply the new gating to every old test.
+	confirmPolls = 1
+	emptyGraceSeconds = 0
 	os.Exit(m.Run())
 }
 

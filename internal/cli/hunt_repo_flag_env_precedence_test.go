@@ -12,9 +12,11 @@ import (
 func snapshotFlagGlobals() func() {
 	oldRepo, oldRef, oldSelf, oldIgnored := ghRepo, ghRef, selfJobName, ignoredJobs
 	oldTimeout, oldInterval := timeoutSecond, validateIntervalSeconds
+	oldConfirm, oldGrace := confirmPolls, emptyGraceSeconds
 	return func() {
 		ghRepo, ghRef, selfJobName, ignoredJobs = oldRepo, oldRef, oldSelf, oldIgnored
 		timeoutSecond, validateIntervalSeconds = oldTimeout, oldInterval
+		confirmPolls, emptyGraceSeconds = oldConfirm, oldGrace
 	}
 }
 

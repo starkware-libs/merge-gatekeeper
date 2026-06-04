@@ -137,6 +137,9 @@ func (sv *statusValidator) Validate(ctx context.Context) (validators.Status, err
 		cancelledJobs:  make([]string, 0),
 		ignoredJobs:    make([]string, 0, len(ghaStatuses)),
 		succeeded:      true,
+		// listGhaStatuses just ran, so lastResolvedHeadSHA holds this poll's
+		// resolved commit — feed it into the status Fingerprint.
+		resolvedHeadSHA: sv.lastResolvedHeadSHA,
 	}
 
 	st.ignoredJobs = append(st.ignoredJobs, sv.ignoredJobs...)
