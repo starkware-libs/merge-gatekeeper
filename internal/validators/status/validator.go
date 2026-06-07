@@ -79,7 +79,18 @@ type statusValidator struct {
 	// blind the duplicate-named-jobs guard to duplicates introduced by the
 	// push, and feed the matrix-parent heuristic the previous SHA's job set.
 	lastResolvedHeadSHA string
+
+	// refGoneStreak counts consecutive polls whose listings failed with
+	// GitHub's "Ref not found" AFTER the ref had resolved at least once. A
+	// deleted branch or tag never comes back, so a short streak separates
+	// real deletion (a merge-queue branch is removed the moment its batch
+	// merges or is dequeued) from a replication-lag 404.
+	refGoneStreak int
 }
+
+// refGoneTerminalPolls is how many consecutive "Ref not found" polls on a
+// previously-resolving ref are conclusive evidence the ref was deleted.
+const refGoneTerminalPolls = 3
 
 func CreateValidator(c github.Client, opts ...Option) (validators.Validator, error) {
 	sv := &statusValidator{
@@ -127,8 +138,26 @@ func (sv *statusValidator) validateFields() error {
 func (sv *statusValidator) Validate(ctx context.Context) (validators.Status, error) {
 	ghaStatuses, err := sv.listGhaStatuses(ctx)
 	if err != nil {
+		// A ref that resolved earlier in this run and now consistently 404s
+		// was deleted mid-run — for a merge-queue ref, the batch merged or
+		// was dequeued. Fail fast with an actionable error instead of
+		// ghost-polling the remaining timeout budget (observed live: 21
+		// minutes of "Ref not found" transients on sequencer run
+		// 27088546998). Deliberately NOT %w-wrapping err: the transient
+		// marker must not survive into the terminal error.
+		if github.IsRefNotFound(err) && sv.lastResolvedHeadSHA != "" {
+			sv.refGoneStreak++
+			if sv.refGoneStreak >= refGoneTerminalPolls {
+				return nil, fmt.Errorf(
+					"ref %q not found for %d consecutive polls: the branch or tag was deleted while the gatekeeper was running (a merge-queue ref disappears when its batch merges or is dequeued); last error: %v",
+					sv.ref, sv.refGoneStreak, err)
+			}
+		} else {
+			sv.refGoneStreak = 0
+		}
 		return nil, err
 	}
+	sv.refGoneStreak = 0
 
 	st := &status{
 		totalJobs:      make([]string, 0, len(ghaStatuses)),
