@@ -732,6 +732,27 @@ func (sv *statusValidator) filterStaleCheckRuns(runResults []*github.CheckRun, w
 			len(supersededSuites), len(workflowRuns))
 	}
 
+	// Suites holding the gatekeeper's own check run. The stale-attempt rule
+	// must not pend their settled sibling SUCCESSES: that rule holds "until
+	// the attempt completes", but this run's completion waits on the
+	// gatekeeper itself — a self-deadlock when the re-run never recreates the
+	// sibling ("re-run failed jobs" re-runs failures only; observed live on
+	// sequencer run 27087903294, where attempt 2 re-ran only the gatekeeper
+	// and commitlint's attempt-1 success was pended until the gatekeeper's
+	// own timeout). A success the attempt does re-execute ("Re-run all jobs")
+	// surfaces as a fresh check run that wins dedup over the old one. Stale
+	// FAILURES still pend — a failed sibling is by definition part of any
+	// re-run. Other suites keep pending successes too: their runs complete
+	// independently, so the wait is bounded, not circular.
+	selfSuites := make(map[int64]struct{})
+	for _, run := range runResults {
+		if run.Name != nil && *run.Name == sv.selfJobName {
+			if id := suiteIDOf(run); id != 0 {
+				selfSuites[id] = struct{}{}
+			}
+		}
+	}
+
 	filtered := make([]*github.CheckRun, 0, len(runResults))
 	for _, run := range runResults {
 		suiteID := suiteIDOf(run)
@@ -771,7 +792,8 @@ func (sv *statusValidator) filterStaleCheckRuns(runResults []*github.CheckRun, w
 			continue
 		}
 
-		if isSettledSuccess(run) && !staleAttempt {
+		_, ownSuite := selfSuites[suiteID]
+		if isSettledSuccess(run) && (!staleAttempt || ownSuite) {
 			filtered = append(filtered, run)
 			continue
 		}
