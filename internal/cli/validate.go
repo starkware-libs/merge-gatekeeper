@@ -105,6 +105,14 @@ func validateCmd() *cobra.Command {
 	return cmd
 }
 
+// isMergeQueueRef reports whether ref names a GitHub merge-queue branch
+// (gh-readonly-queue/...), with or without the refs/heads/ prefix. Merge-
+// queue branches are deleted by GitHub the moment their batch merges or is
+// dequeued — while ordinary branches disappearing mid-run is an anomaly.
+func isMergeQueueRef(ref string) bool {
+	return strings.HasPrefix(strings.TrimPrefix(ref, "refs/heads/"), "gh-readonly-queue/")
+}
+
 func ownerAndRepository(fullName string) (owner string, repo string) {
 	sp := strings.Split(fullName, "/")
 	switch len(sp) {
@@ -180,6 +188,19 @@ func doValidateCmd(ctx context.Context, logger logger, vs ...validators.Validato
 			for _, v := range vs {
 				st, err := validate(ctx, v, logger)
 				if err != nil {
+					// A merge-queue ref deleted right after a green poll means
+					// the batch merged out from under the confirmation window:
+					// the verdict can no longer gate anything, and the last
+					// observed world was green — report success rather than
+					// failing a merge that already happened. Strictly scoped:
+					// a gate that never saw green stays red (the queue merged
+					// something this gate hadn't finished checking), and a
+					// deleted NON-queue ref stays red.
+					var refGone *validators.RefGoneError
+					if errors.As(err, &refGone) && isMergeQueueRef(ghRef) && streak >= 1 {
+						logger.Println("The merge queue deleted the ref after a green poll — the batch merged; reporting success.")
+						return nil
+					}
 					return err
 				}
 				// A transient API error yields no status: this poll observed
