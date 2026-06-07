@@ -140,17 +140,17 @@ func (sv *statusValidator) Validate(ctx context.Context) (validators.Status, err
 	if err != nil {
 		// A ref that resolved earlier in this run and now consistently 404s
 		// was deleted mid-run — for a merge-queue ref, the batch merged or
-		// was dequeued. Fail fast with an actionable error instead of
+		// was dequeued. Fail fast with an actionable, TYPED error instead of
 		// ghost-polling the remaining timeout budget (observed live: 21
 		// minutes of "Ref not found" transients on sequencer run
-		// 27088546998). Deliberately NOT %w-wrapping err: the transient
-		// marker must not survive into the terminal error.
+		// 27088546998). The polling loop matches on RefGoneError to decide
+		// whether a merge-queue ref deleted after a green poll counts as
+		// success; RefGoneError carries the transient cause for the message
+		// only, without exposing it to errors.As.
 		if github.IsRefNotFound(err) && sv.lastResolvedHeadSHA != "" {
 			sv.refGoneStreak++
 			if sv.refGoneStreak >= refGoneTerminalPolls {
-				return nil, fmt.Errorf(
-					"ref %q not found for %d consecutive polls: the branch or tag was deleted while the gatekeeper was running (a merge-queue ref disappears when its batch merges or is dequeued); last error: %v",
-					sv.ref, sv.refGoneStreak, err)
+				return nil, &validators.RefGoneError{Ref: sv.ref, Polls: sv.refGoneStreak, Err: err}
 			}
 		} else {
 			sv.refGoneStreak = 0

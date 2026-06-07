@@ -2,6 +2,7 @@ package status
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -96,5 +97,12 @@ func Test_Hunt_RefDeletedGhostPoll(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), fullSHARef) {
 		t.Errorf("the terminal error must name the ref so the failure is actionable; got: %v", err)
+	}
+	// The polling loop matches on the concrete type to decide whether a
+	// merge-queue ref deleted after a green poll counts as success — the
+	// terminal error must be a *validators.RefGoneError, not a bare error.
+	var refGoneErr *validators.RefGoneError
+	if !errors.As(err, &refGoneErr) {
+		t.Errorf("the terminal error must be a *validators.RefGoneError for the loop to match on; got %T: %v", err, err)
 	}
 }
