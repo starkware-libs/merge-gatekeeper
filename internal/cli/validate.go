@@ -100,7 +100,7 @@ func validateCmd() *cobra.Command {
 	cmd.PersistentFlags().StringVarP(&ignoredJobs, "ignored", "i", "", "set ignored jobs (comma-separated list)")
 
 	cmd.PersistentFlags().UintVar(&confirmPolls, "confirm-polls", 3, "consecutive green polls observing the same jobs required before reporting success")
-	cmd.PersistentFlags().UintVar(&emptyGraceSeconds, "empty-grace", 30, "when no jobs are discovered, also wait this many seconds from start before reporting success")
+	cmd.PersistentFlags().UintVar(&emptyGraceSeconds, "empty-grace", 30, "when no jobs are discovered, require the empty result to hold for this many seconds before reporting success")
 
 	return cmd
 }
@@ -137,8 +137,9 @@ func doValidateCmd(ctx context.Context, logger logger, vs ...validators.Validato
 	if confirmPolls == 0 {
 		return errors.New("invalid configuration: confirm-polls must be at least 1")
 	}
-	// The success path needs at least (confirmPolls-1) intervals of streak plus
-	// the empty-set grace; a tighter timeout can only ever expire.
+	// Conservative startup sanity bound: a healthy success path needs streak
+	// room ((confirmPolls-1) intervals) and, for an empty world, the grace —
+	// a timeout that cannot fit their sum is a config that mostly expires.
 	minBudget := (confirmPolls-1)*validateIntervalSeconds + emptyGraceSeconds
 	if minBudget >= timeoutSecond {
 		return fmt.Errorf(
@@ -158,10 +159,13 @@ func doValidateCmd(ctx context.Context, logger logger, vs ...validators.Validato
 	// re-run attempt). Success therefore requires confirmPolls consecutive
 	// green polls that observed the SAME world — fingerprints carry the
 	// resolved head SHA and the gated job set, so a branch advancing mid-run
-	// or CI materializing late resets the streak automatically. Red stays
-	// fail-fast: validation failures abort on the poll that sees them.
-	start := time.Now()
+	// or CI materializing late resets the streak automatically. The empty-set
+	// grace is anchored at the CURRENT streak's start, not at process start:
+	// a mid-run push is a new trigger, and the empty world it briefly exposes
+	// deserves the same grace the original trigger got. Red stays fail-fast:
+	// validation failures abort on the poll that sees them.
 	var streak uint
+	var streakStart time.Time
 	var lastFingerprint string
 	var haveFingerprint bool
 
@@ -201,15 +205,17 @@ func doValidateCmd(ctx context.Context, logger logger, vs ...validators.Validato
 				streak++
 			} else {
 				streak = 1
+				streakStart = time.Now()
 			}
 			lastFingerprint = fingerprint
 			haveFingerprint = true
 
 			// An empty gated set right after the trigger usually means CI has
 			// not materialized into the listings yet — hold the gate for the
-			// grace period before trusting it.
+			// grace period before trusting it. Measured from the streak start,
+			// so the grace re-arms whenever the observed world changes.
 			graceMet := totalTracked > 0 ||
-				time.Since(start) >= time.Duration(emptyGraceSeconds)*time.Second
+				time.Since(streakStart) >= time.Duration(emptyGraceSeconds)*time.Second
 
 			if streak >= confirmPolls && graceMet {
 				logger.Println("All validations were successful!")
@@ -218,7 +224,7 @@ func doValidateCmd(ctx context.Context, logger logger, vs ...validators.Validato
 
 			if !graceMet {
 				logger.PrintErrf("  green poll %d/%d, but no jobs were discovered yet; holding for the %ds empty-set grace (%.0fs elapsed)\n\n",
-					streak, confirmPolls, emptyGraceSeconds, time.Since(start).Seconds())
+					streak, confirmPolls, emptyGraceSeconds, time.Since(streakStart).Seconds())
 			} else {
 				logger.PrintErrf("  green poll %d/%d; confirming the result holds before reporting success\n\n",
 					streak, confirmPolls)
