@@ -79,7 +79,18 @@ type statusValidator struct {
 	// blind the duplicate-named-jobs guard to duplicates introduced by the
 	// push, and feed the matrix-parent heuristic the previous SHA's job set.
 	lastResolvedHeadSHA string
+
+	// refGoneStreak counts consecutive polls whose listings failed with
+	// GitHub's "Ref not found" AFTER the ref had resolved at least once. A
+	// deleted branch or tag never comes back, so a short streak separates
+	// real deletion (a merge-queue branch is removed the moment its batch
+	// merges or is dequeued) from a replication-lag 404.
+	refGoneStreak int
 }
+
+// refGoneTerminalPolls is how many consecutive "Ref not found" polls on a
+// previously-resolving ref are conclusive evidence the ref was deleted.
+const refGoneTerminalPolls = 3
 
 func CreateValidator(c github.Client, opts ...Option) (validators.Validator, error) {
 	sv := &statusValidator{
@@ -127,8 +138,26 @@ func (sv *statusValidator) validateFields() error {
 func (sv *statusValidator) Validate(ctx context.Context) (validators.Status, error) {
 	ghaStatuses, err := sv.listGhaStatuses(ctx)
 	if err != nil {
+		// A ref that resolved earlier in this run and now consistently 404s
+		// was deleted mid-run — for a merge-queue ref, the batch merged or
+		// was dequeued. Fail fast with an actionable error instead of
+		// ghost-polling the remaining timeout budget (observed live: 21
+		// minutes of "Ref not found" transients on sequencer run
+		// 27088546998). Deliberately NOT %w-wrapping err: the transient
+		// marker must not survive into the terminal error.
+		if github.IsRefNotFound(err) && sv.lastResolvedHeadSHA != "" {
+			sv.refGoneStreak++
+			if sv.refGoneStreak >= refGoneTerminalPolls {
+				return nil, fmt.Errorf(
+					"ref %q not found for %d consecutive polls: the branch or tag was deleted while the gatekeeper was running (a merge-queue ref disappears when its batch merges or is dequeued); last error: %v",
+					sv.ref, sv.refGoneStreak, err)
+			}
+		} else {
+			sv.refGoneStreak = 0
+		}
 		return nil, err
 	}
+	sv.refGoneStreak = 0
 
 	st := &status{
 		totalJobs:      make([]string, 0, len(ghaStatuses)),
@@ -732,6 +761,27 @@ func (sv *statusValidator) filterStaleCheckRuns(runResults []*github.CheckRun, w
 			len(supersededSuites), len(workflowRuns))
 	}
 
+	// Suites holding the gatekeeper's own check run. The stale-attempt rule
+	// must not pend their settled sibling SUCCESSES: that rule holds "until
+	// the attempt completes", but this run's completion waits on the
+	// gatekeeper itself — a self-deadlock when the re-run never recreates the
+	// sibling ("re-run failed jobs" re-runs failures only; observed live on
+	// sequencer run 27087903294, where attempt 2 re-ran only the gatekeeper
+	// and commitlint's attempt-1 success was pended until the gatekeeper's
+	// own timeout). A success the attempt does re-execute ("Re-run all jobs")
+	// surfaces as a fresh check run that wins dedup over the old one. Stale
+	// FAILURES still pend — a failed sibling is by definition part of any
+	// re-run. Other suites keep pending successes too: their runs complete
+	// independently, so the wait is bounded, not circular.
+	selfSuites := make(map[int64]struct{})
+	for _, run := range runResults {
+		if run.Name != nil && *run.Name == sv.selfJobName {
+			if id := suiteIDOf(run); id != 0 {
+				selfSuites[id] = struct{}{}
+			}
+		}
+	}
+
 	filtered := make([]*github.CheckRun, 0, len(runResults))
 	for _, run := range runResults {
 		suiteID := suiteIDOf(run)
@@ -771,7 +821,8 @@ func (sv *statusValidator) filterStaleCheckRuns(runResults []*github.CheckRun, w
 			continue
 		}
 
-		if isSettledSuccess(run) && !staleAttempt {
+		_, ownSuite := selfSuites[suiteID]
+		if isSettledSuccess(run) && (!staleAttempt || ownSuite) {
 			filtered = append(filtered, run)
 			continue
 		}

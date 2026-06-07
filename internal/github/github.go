@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/go-github/v84/github"
@@ -21,6 +23,7 @@ type (
 	CombinedStatus = github.CombinedStatus
 	RepoStatus     = github.RepoStatus
 	Response       = github.Response
+	ErrorResponse  = github.ErrorResponse
 )
 
 type (
@@ -92,6 +95,23 @@ func (c *client) GetCommitSHA1(ctx context.Context, owner, repo, ref string) (st
 	return withRetry(ctx, defaultMaxRetries, defaultRetryDelay, func() (string, *Response, error) {
 		return c.ghc.Repositories.GetCommitSHA1(ctx, owner, repo, ref, "")
 	})
+}
+
+// IsRefNotFound reports whether err is (or wraps) GitHub's 404 for a ref
+// that does not exist — the per-ref endpoints' response after a branch or
+// tag is deleted. Deliberately narrower than any 404: a plain "Not Found"
+// (repository gone, token lost access) stays unclassified so callers keep
+// treating it as an ordinary transient failure.
+func IsRefNotFound(err error) bool {
+	var ghErr *github.ErrorResponse
+	if !errors.As(err, &ghErr) {
+		return false
+	}
+	if ghErr.Response == nil || ghErr.Response.StatusCode != http.StatusNotFound {
+		return false
+	}
+	return strings.Contains(ghErr.Message, "Ref not found") ||
+		strings.Contains(ghErr.Message, "No commit found")
 }
 
 // withRetry runs fn and retries on 5xx and rate-limit responses with
