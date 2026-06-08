@@ -176,6 +176,14 @@ func doValidateCmd(ctx context.Context, logger logger, vs ...validators.Validato
 	var streakStart time.Time
 	var lastFingerprint string
 	var haveFingerprint bool
+	// lastObservedAllGreen records whether the most recent poll that actually
+	// observed the world saw it all-green. Unlike streak, it is NOT reset by a
+	// transient poll (one that observed nothing) — only by a real observation
+	// that was not green. The merge-queue ref-gone success path keys on this:
+	// a deleted ref is reached through refGoneTerminalPolls transient 404s that
+	// would zero any streak, so "did we last see green" is the only durable
+	// signal that the batch merged after our verdict was green.
+	var lastObservedAllGreen bool
 
 	for {
 		select {
@@ -183,34 +191,51 @@ func doValidateCmd(ctx context.Context, logger logger, vs ...validators.Validato
 			return ctx.Err()
 		case <-intervalTicker.C():
 			allGreen := true
+			observedNothing := false
 			totalTracked := 0
 			fingerprints := make([]string, 0, len(vs))
 			for _, v := range vs {
 				st, err := validate(ctx, v, logger)
 				if err != nil {
-					// A merge-queue ref deleted right after a green poll means
-					// the batch merged out from under the confirmation window:
-					// the verdict can no longer gate anything, and the last
-					// observed world was green — report success rather than
-					// failing a merge that already happened. Strictly scoped:
-					// a gate that never saw green stays red (the queue merged
-					// something this gate hadn't finished checking), and a
-					// deleted NON-queue ref stays red.
+					// A merge-queue ref deleted after we last saw an all-green
+					// world means the batch merged out from under the
+					// confirmation window: the verdict can no longer gate
+					// anything, so report success rather than failing a merge
+					// that already happened. Strictly scoped: a gate whose last
+					// real observation was not green stays red (the queue merged
+					// something this gate hadn't confirmed), and a deleted
+					// NON-queue ref stays red.
 					var refGone *validators.RefGoneError
-					if errors.As(err, &refGone) && isMergeQueueRef(ghRef) && streak >= 1 {
+					if errors.As(err, &refGone) && isMergeQueueRef(ghRef) && lastObservedAllGreen {
 						logger.Println("The merge queue deleted the ref after a green poll — the batch merged; reporting success.")
 						return nil
 					}
 					return err
 				}
 				// A transient API error yields no status: this poll observed
-				// nothing, so it cannot extend the quiescence streak.
-				if st == nil || !st.IsSuccess() {
+				// nothing, so it cannot extend the quiescence streak — but it
+				// must also not erase the memory of the last world we DID
+				// observe (the ref-gone decision above depends on it; a deleted
+				// ref is preceded by exactly such transient 404s).
+				if st == nil {
+					observedNothing = true
+					allGreen = false
+					break
+				}
+				if !st.IsSuccess() {
 					allGreen = false
 					break
 				}
 				totalTracked += st.TrackedJobs()
 				fingerprints = append(fingerprints, st.Fingerprint())
+			}
+			// Update the durable "last observed green" memory: set true on a
+			// fully-green poll, false on a poll that observed a non-green world,
+			// unchanged on a poll that observed nothing (transient).
+			if allGreen {
+				lastObservedAllGreen = true
+			} else if !observedNothing {
+				lastObservedAllGreen = false
 			}
 			if !allGreen {
 				streak = 0
