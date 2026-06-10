@@ -176,6 +176,13 @@ func doValidateCmd(ctx context.Context, logger logger, vs ...validators.Validato
 	var streakStart time.Time
 	var lastFingerprint string
 	var haveFingerprint bool
+	// sawGreen latches the first all-green poll and is NEVER reset. It backs the
+	// merge-queue ref-gone carve-out below, which asks "did we ever see this ref
+	// green before it vanished?" — not "was the last poll green?". The streak is
+	// the wrong signal there: a terminal RefGoneError is always preceded by the
+	// transient 404 polls that accumulate into it, and each of those resets the
+	// streak to 0, so streak is always 0 by the time the carve-out is reached.
+	var sawGreen bool
 
 	for {
 		select {
@@ -188,16 +195,18 @@ func doValidateCmd(ctx context.Context, logger logger, vs ...validators.Validato
 			for _, v := range vs {
 				st, err := validate(ctx, v, logger)
 				if err != nil {
-					// A merge-queue ref deleted right after a green poll means
-					// the batch merged out from under the confirmation window:
-					// the verdict can no longer gate anything, and the last
-					// observed world was green — report success rather than
+					// A merge-queue ref deleted after it was once seen green
+					// means the batch merged out from under the confirmation
+					// window: the verdict can no longer gate anything, and the
+					// world was observed green — report success rather than
 					// failing a merge that already happened. Strictly scoped:
 					// a gate that never saw green stays red (the queue merged
 					// something this gate hadn't finished checking), and a
-					// deleted NON-queue ref stays red.
+					// deleted NON-queue ref stays red. Gated on sawGreen, not
+					// streak: the transient 404s that build up to the terminal
+					// RefGoneError have already reset the streak to 0 by now.
 					var refGone *validators.RefGoneError
-					if errors.As(err, &refGone) && isMergeQueueRef(ghRef) && streak >= 1 {
+					if errors.As(err, &refGone) && isMergeQueueRef(ghRef) && sawGreen {
 						logger.Println("The merge queue deleted the ref after a green poll — the batch merged; reporting success.")
 						return nil
 					}
@@ -220,6 +229,10 @@ func doValidateCmd(ctx context.Context, logger logger, vs ...validators.Validato
 				logger.PrintErrf("           Waiting for %d seconds before retrying.\n\n", validateIntervalSeconds)
 				break
 			}
+			// This poll observed an all-green world: latch it for the
+			// merge-queue ref-gone carve-out, which must survive the streak
+			// being reset by later transient polls.
+			sawGreen = true
 
 			fingerprint := strings.Join(fingerprints, "\x01")
 			if haveFingerprint && fingerprint == lastFingerprint {
